@@ -26,6 +26,7 @@
 #undef None
 #endif
 #include "KeyMap.hpp"
+#include "../../shared/UiLanguage.hpp"
 
 inline double nowSeconds() {
     static const auto start = std::chrono::steady_clock::now();
@@ -75,10 +76,17 @@ public:
     }
 
     std::string statusText() const {
-        if (isEvdevActive && isXI2Active) return "🟢 硬件全状态监听中 (evdev + XInput2)";
-        if (isEvdevActive) return "🟢 内核硬件监听中 (evdev Wayland/X11)";
-        if (isXI2Active) return "🟢 全局原始监听中 (XInput2 打字/游戏)";
-        return "⚠️ Wayland 需加入 input 组以全局监听";
+        if (isEvdevActive && isXI2Active)
+            return kurocat::uiText("🟢 硬件全状态监听中 (evdev + XInput2)", "🟢 Full hardware input capture (evdev + XInput2)",
+                                   "🟢 Captura completa do hardware (evdev + XInput2)");
+        if (isEvdevActive)
+            return kurocat::uiText("🟢 内核硬件监听中 (evdev Wayland/X11)", "🟢 Kernel input capture (evdev Wayland/X11)",
+                                   "🟢 Captura pelo kernel (evdev Wayland/X11)");
+        if (isXI2Active)
+            return kurocat::uiText("🟢 全局原始监听中 (XInput2 打字/游戏)", "🟢 Global raw input (XInput2 typing/gaming)",
+                                   "🟢 Captura global (XInput2, digitação/jogos)");
+        return kurocat::uiText("⚠️ Wayland 需加入 input 组以全局监听", "⚠️ Wayland: join the input group for global capture",
+                               "⚠️ Wayland: entre no grupo input para captura global");
     }
 
     /// Drains queued events from background input threads and updates mouse velocity on main 60Hz loop.

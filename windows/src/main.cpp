@@ -31,6 +31,12 @@ using std::max;
 #include "CatPhysics.hpp"
 #include "CatRenderer.hpp"
 #include "SkinLibrary.hpp"
+#include "../../shared/UiLanguage.hpp"
+
+// UI string for the current language (kept in sync with CatSettings::language via applyUiLanguage / startup).
+inline const wchar_t* trW(const wchar_t* zh, const wchar_t* en, const wchar_t* pt) {
+    return uiTextW(static_cast<int>(kurocat::uiLanguage()), zh, en, pt);
+}
 
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
@@ -57,6 +63,7 @@ constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray ow
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
 constexpr double FRAME_INTERVAL = 1.0 / 60.0;
+constexpr const wchar_t* FORK_RELEASES_URL = L"https://github.com/tobecwb/KuroCat/releases";
 constexpr const wchar_t* UPDATE_PAGE_URL = L"https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L";
 constexpr const wchar_t* UPDATE_WIN_EXE_PATH = L"/downloads/KuroCat-Windows-x64.exe?sharecode=JVAABIVZ7L";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
@@ -89,6 +96,7 @@ enum MenuCmd : UINT {
     CMD_TOGGLE_EDIT,
     CMD_LANG_ZH,
     CMD_LANG_EN,
+    CMD_LANG_PT,
     CMD_COAT_BLACK,
     CMD_COAT_SIAMESE,
     CMD_COAT_SHORTHAIR,
@@ -723,6 +731,12 @@ void startInAppUpdate(AppState& app) {
     }
 }
 
+const wchar_t* trayTipText() {
+    return trW(L"KuroCat 黑猫键盘桌宠 (右键/左键打开菜单)",
+               L"KuroCat Keyboard Cat (click to open the menu)",
+               L"KuroCat – gatinho do teclado (clique para abrir o menu)");
+}
+
 void registerTrayIcon(AppState& app) {
     if (!app.trayIcon) app.trayIcon = createCatTrayIcon();
     app.nid = {};
@@ -732,7 +746,7 @@ void registerTrayIcon(AppState& app) {
     app.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     app.nid.uCallbackMessage = WM_TRAYICON;
     app.nid.hIcon = app.trayIcon;
-    wcscpy_s(app.nid.szTip, L"KuroCat \u9ED1\u732B\u952E\u76D8\u684C\u5BA0 (\u53F3\u952E/\u5DE6\u952E\u6253\u5F00\u83DC\u5355)");
+    wcscpy_s(app.nid.szTip, trayTipText());
     Shell_NotifyIconW(NIM_ADD, &app.nid);
 }
 
@@ -915,8 +929,12 @@ void housekeeping(AppState& app) {
             if (!app.warnedElevatedForeground && (fullscreenFg || (now - app.blockedForegroundSince >= 1.0))) {
                 app.warnedElevatedForeground = true;
                 showTrayBalloon(app,
-                    L"KuroCat 听不到当前窗口的键盘",
-                    L"当前软件（如 WPS / 游戏）以管理员权限运行，Windows 会拦截它的键盘输入。右键小猫或托盘图标 →「以管理员身份重新启动」即可恢复。");
+                    trW(L"KuroCat 听不到当前窗口的键盘",
+                        L"KuroCat can't hear the keyboard in this window",
+                        L"O KuroCat não consegue ouvir o teclado desta janela"),
+                    trW(L"当前软件（如 WPS / 游戏）以管理员权限运行，Windows 会拦截它的键盘输入。右键小猫或托盘图标 →「以管理员身份重新启动」即可恢复。",
+                        L"This app (e.g. WPS or a game) runs as administrator, so Windows withholds its keyboard input. Right-click the cat or the tray icon → \"Restart as Administrator\" to fix it.",
+                        L"Este programa (ex.: WPS ou um jogo) roda como administrador e o Windows bloqueia o teclado dele. Clique com o botão direito no gato ou no ícone da bandeja → “Reiniciar como administrador” para resolver."));
             }
         } else {
             app.blockedForegroundSince = 0.0;
@@ -986,6 +1004,24 @@ const SkinSpec& activeSkin(const AppState& app) {
     return builtInSkin(app.settings.coatTheme);
 }
 
+// Name shown for a skin; built-in coats are localized in English / Portuguese.
+std::wstring skinDisplayNameW(const AppState& app, const SkinSpec& s) {
+    (void)app;
+    if (s.builtIn && kurocat::uiLanguage() != kurocat::UiLanguage::Chinese
+        && s.id.size() == 9 && s.id.compare(0, 8, "builtin:") == 0) {
+        switch (s.id[8]) {
+            case '0': return trW(L"", L"Classic Black Cat", L"Gatinho preto clássico");
+            case '1': return trW(L"", L"Siamese Cat", L"Gato siamês");
+            case '2': return trW(L"", L"Silver Tabby Shorthair", L"Pelo curto tigrado prateado");
+            case '3': return trW(L"", L"Orange & White Cat", L"Gato laranja e branco");
+            case '4': return trW(L"", L"Dazed Cat", L"Gato atordoado");
+            case '5': return trW(L"", L"Tabby Cat", L"Gato tigrado");
+            default: break;
+        }
+    }
+    return utf8ToWide(s.name);
+}
+
 const KeyboardSkinSpec& builtInKeyboardSkin(KeyboardTheme theme) {
     static const KeyboardSkinSpec themes[3] = {
         KeyboardSkinSpec::builtInTheme(0),
@@ -1029,10 +1065,13 @@ bool importSkinFile(AppState& app, const std::wstring& path) {
     if (!app.skins.importFile(path, id, error)) {
         // With 换装间 open the red status line explains it in place; a dialog is only for drops onto the cat.
         if (app.dressingRoom) {
-            setDressingStatus(app, L"没能导入「" + base + L"」：" + utf8ToWide(error), 2);
+            setDressingStatus(app, trW(L"没能导入「", L"Couldn't import “", L"Não foi possível importar “") + base
+                                   + trW(L"」：", L"”: ", L"”: ") + utf8ToWide(error), 2);
         } else {
-            std::wstring msg = L"「" + base + L"」：" + utf8ToWide(error);
-            MessageBoxW(app.menuOwnerHwnd, msg.c_str(), L"无法导入这个皮肤", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+            std::wstring msg = trW(L"「", L"“", L"“") + base + trW(L"」：", L"”: ", L"”: ") + utf8ToWide(error);
+            MessageBoxW(app.menuOwnerHwnd, msg.c_str(),
+                        trW(L"无法导入这个皮肤", L"Failed to Import Skin", L"Não foi possível importar a skin"),
+                        MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
         }
         return false;
     }
@@ -1040,15 +1079,18 @@ bool importSkinFile(AppState& app, const std::wstring& path) {
     app.settings.customSkin = id;
     app.settings.saveToRegistry();
     const SkinSpec* s = app.skins.find(id);
-    std::wstring msg = L"✓ 已换上「" + (s ? utf8ToWide(s->name) : std::wstring(L"新皮肤")) + L"」";
-    if (s && !s->author.empty()) msg += L"（作者：" + utf8ToWide(s->author) + L"）";
+    std::wstring msg = trW(L"✓ 已换上「", L"✓ Now wearing “", L"✓ Agora vestindo “")
+        + (s ? utf8ToWide(s->name) : std::wstring(trW(L"新皮肤", L"new skin", L"nova skin"))) + trW(L"」", L"”", L"”");
+    if (s && !s->author.empty()) msg += trW(L"（作者：", L" (by ", L" (por ") + utf8ToWide(s->author) + trW(L"）", L")", L")");
     if (s) {
         int dup = 0;
         for (const auto& item : app.skins.skins) if (item.name == s->name) ++dup;
-        if (dup > 1) msg += L" · 存在同名皮肤，已附加短编号区分";
+        if (dup > 1) msg += trW(L" · 存在同名皮肤，已附加短编号区分",
+                                L" · A skin with this name exists; a short ID was added",
+                                L" · Já existe uma skin com esse nome; foi adicionado um código curto");
     }
     setDressingStatus(app, msg, 1);
-    if (!app.dressingRoom) showTrayBalloon(app, L"KuroCat 换装间", msg.c_str());
+    if (!app.dressingRoom) showTrayBalloon(app, trW(L"KuroCat 换装间", L"KuroCat Dressing Room", L"KuroCat – Provador"), msg.c_str());
     return true;
 }
 
@@ -1058,11 +1100,12 @@ bool importKeyboardSkinFile(AppState& app, const std::wstring& path) {
     std::wstring base = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
     if (!app.kbLibrary.importFile(path, id, error)) {
         if (app.dressingRoom) {
-            setDressingStatus(app, L"没能导入键盘皮肤「" + base + L"」：" + utf8ToWide(error), 2);
+            setDressingStatus(app, trW(L"没能导入键盘皮肤「", L"Couldn't import keyboard skin “", L"Não foi possível importar a skin de teclado “") + base
+                                   + trW(L"」：", L"”: ", L"”: ") + utf8ToWide(error), 2);
         } else {
-            std::wstring msg = L"「" + base + L"」：" + utf8ToWide(error);
+            std::wstring msg = trW(L"「", L"“", L"“") + base + trW(L"」：", L"”: ", L"”: ") + utf8ToWide(error);
             MessageBoxW(app.menuOwnerHwnd, msg.c_str(),
-                        app.settings.isEnglish ? L"Failed to Import Keyboard Skin" : L"无法导入这个键盘皮肤",
+                        trW(L"无法导入这个键盘皮肤", L"Failed to Import Keyboard Skin", L"Não foi possível importar a skin de teclado"),
                         MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
         }
         return false;
@@ -1070,10 +1113,11 @@ bool importKeyboardSkinFile(AppState& app, const std::wstring& path) {
     app.settings.customKeyboard = id;
     app.settings.saveToRegistry();
     const KeyboardSkinSpec* kb = app.kbLibrary.find(id);
-    std::wstring msg = L"✓ 已换上键盘皮肤「" + (kb ? utf8ToWide(kb->name) : std::wstring(L"新键盘")) + L"」";
-    if (kb && !kb->author.empty()) msg += L"（作者：" + utf8ToWide(kb->author) + L"）";
+    std::wstring msg = trW(L"✓ 已换上键盘皮肤「", L"✓ Keyboard skin applied: “", L"✓ Skin de teclado aplicada: “")
+        + (kb ? utf8ToWide(kb->name) : std::wstring(trW(L"新键盘", L"new keyboard", L"novo teclado"))) + trW(L"」", L"”", L"”");
+    if (kb && !kb->author.empty()) msg += trW(L"（作者：", L" (by ", L" (por ") + utf8ToWide(kb->author) + trW(L"）", L")", L")");
     setDressingStatus(app, msg, 1);
-    if (!app.dressingRoom) showTrayBalloon(app, L"KuroCat 键盘皮肤", msg.c_str());
+    if (!app.dressingRoom) showTrayBalloon(app, trW(L"KuroCat 键盘皮肤", L"KuroCat Keyboard Skin", L"KuroCat – Skin de teclado"), msg.c_str());
     return true;
 }
 
@@ -1111,17 +1155,23 @@ void chooseSkinFile(AppState& app) {
     auto getOpen = dlg ? (GetOpenFileNameFn)(void*)GetProcAddress(dlg, "GetOpenFileNameW") : nullptr;
     if (!getOpen) {
         if (dlg) FreeLibrary(dlg);
-        MessageBoxW(app.dressingRoom, L"无法打开文件选择框，请直接把 .kurocat 文件拖进来。", L"KuroCat 换装间", MB_OK | MB_ICONWARNING);
+        MessageBoxW(app.dressingRoom,
+                    trW(L"无法打开文件选择框，请直接把 .kurocat 文件拖进来。",
+                        L"Unable to open the file dialog. Please drag the .kurocat file in here.",
+                        L"Não foi possível abrir a janela de arquivos. Arraste o arquivo .kurocat para cá."),
+                    trW(L"KuroCat 换装间", L"KuroCat Dressing Room", L"KuroCat – Provador"), MB_OK | MB_ICONWARNING);
         return;
     }
     wchar_t file[MAX_PATH * 4] = {0};
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = app.dressingRoom;
-    ofn.lpstrFilter = L"KuroCat 皮肤 (*.kurocat)\0*.kurocat\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = trW(L"KuroCat 皮肤 (*.kurocat)\0*.kurocat\0所有文件 (*.*)\0*.*\0",
+                          L"KuroCat Skin (*.kurocat)\0*.kurocat\0All Files (*.*)\0*.*\0",
+                          L"Skin do KuroCat (*.kurocat)\0*.kurocat\0Todos os arquivos (*.*)\0*.*\0");
     ofn.lpstrFile = file;
     ofn.nMaxFile = (DWORD)(sizeof(file) / sizeof(file[0]));
-    ofn.lpstrTitle = L"选择 .kurocat 皮肤文件";
+    ofn.lpstrTitle = trW(L"选择 .kurocat 皮肤文件", L"Choose a .kurocat Skin File", L"Escolher arquivo de skin .kurocat");
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
     BOOL ok = getOpen(&ofn);
     FreeLibrary(dlg);
@@ -1138,8 +1188,9 @@ void chooseKeyboardSkinFile(AppState& app) {
     if (!getOpen) {
         if (dlg) FreeLibrary(dlg);
         MessageBoxW(app.menuOwnerHwnd,
-                    app.settings.isEnglish ? L"Unable to open file dialog. Please drag a .kurokb or .json file onto the cat."
-                                           : L"无法打开文件选择框，请直接把 .kurokb / .json 文件拖到小猫身上。",
+                    trW(L"无法打开文件选择框，请直接把 .kurokb / .json 文件拖到小猫身上。",
+                        L"Unable to open file dialog. Please drag a .kurokb or .json file onto the cat.",
+                        L"Não foi possível abrir a janela de arquivos. Arraste um arquivo .kurokb ou .json até o gatinho."),
                     L"KuroCat", MB_OK | MB_ICONWARNING | MB_TOPMOST);
         return;
     }
@@ -1147,10 +1198,14 @@ void chooseKeyboardSkinFile(AppState& app) {
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = app.menuOwnerHwnd;
-    ofn.lpstrFilter = L"KuroCat \u952E\u76D8\u76AE\u80A4 (*.kurokb;*.json)\0*.kurokb;*.json\0\u6240\u6709\u6587\u4EF6 (*.*)\0*.*\0";
+    ofn.lpstrFilter = trW(L"KuroCat 键盘皮肤 (*.kurokb;*.json)\0*.kurokb;*.json\0所有文件 (*.*)\0*.*\0",
+                          L"KuroCat Keyboard Skin (*.kurokb;*.json)\0*.kurokb;*.json\0All Files (*.*)\0*.*\0",
+                          L"Skin de teclado do KuroCat (*.kurokb;*.json)\0*.kurokb;*.json\0Todos os arquivos (*.*)\0*.*\0");
     ofn.lpstrFile = file;
     ofn.nMaxFile = (DWORD)(sizeof(file) / sizeof(file[0]));
-    ofn.lpstrTitle = app.settings.isEnglish ? L"Choose Keyboard Skin (.kurokb / .json)" : L"\u9009\u62E9\u952E\u76D8\u76AE\u80A4\u6587\u4EF6 (.kurokb / .json)";
+    ofn.lpstrTitle = trW(L"选择键盘皮肤文件 (.kurokb / .json)",
+                         L"Choose Keyboard Skin (.kurokb / .json)",
+                         L"Escolher skin de teclado (.kurokb / .json)");
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
     BOOL ok = getOpen(&ofn);
     FreeLibrary(dlg);
@@ -1236,11 +1291,14 @@ void paint(AppState& app, HWND hwnd, HDC hdc) {
 
     const SkinSpec& skin = activeSkin(app);
     const Color ink(255, 59, 47, 42), brown(255, 90, 74, 64), muted(255, 168, 153, 141), orange(255, 232, 150, 78);
-    text(g, L"换装间", 21, FontStyleBold, ink, RectF(190, 22, 240, 30));
-    text(g, L"正在穿", 11.5f, FontStyleRegular, muted, RectF(191, 58, 230, 18));
-    text(g, utf8ToWide(skin.name), 15, FontStyleBold, brown, RectF(190, 74, 236, 22), StringAlignmentNear, true);
-    if (!skin.author.empty()) text(g, L"作者 " + utf8ToWide(skin.author), 11.5f, FontStyleRegular, muted, RectF(191, 97, 232, 18), StringAlignmentNear, true);
-    text(g, L"导入皮肤工坊做好的 .kurocat 文件，\n小猫会立刻换上新毛色。", 11.5f, FontStyleRegular, muted, RectF(191, 120, 236, 40));
+    text(g, trW(L"换装间", L"Dressing Room", L"Provador"), 21, FontStyleBold, ink, RectF(190, 22, 240, 30));
+    text(g, trW(L"正在穿", L"Wearing", L"Vestindo agora"), 11.5f, FontStyleRegular, muted, RectF(191, 58, 230, 18));
+    text(g, skinDisplayNameW(app, skin), 15, FontStyleBold, brown, RectF(190, 74, 236, 22), StringAlignmentNear, true);
+    if (!skin.author.empty()) text(g, trW(L"作者 ", L"By ", L"Por ") + utf8ToWide(skin.author), 11.5f, FontStyleRegular, muted, RectF(191, 97, 232, 18), StringAlignmentNear, true);
+    text(g, trW(L"导入皮肤工坊做好的 .kurocat 文件，\n小猫会立刻换上新毛色。",
+                L"Import a .kurocat from the Skin Workshop\nand the cat wears it instantly.",
+                L"Importe uma skin .kurocat da oficina\ne o gatinho muda de pelagem na hora."),
+         11.5f, FontStyleRegular, muted, RectF(191, 120, 236, 40));
 
     // Drop zone
     GraphicsPath zone; roundRect(zone, dropRect, 16);
@@ -1252,8 +1310,10 @@ void paint(AppState& app, HWND hwnd, HDC hdc) {
     g.DrawPath(&dash, &zone);
     float cx = dropRect.X + dropRect.Width / 2, cy = dropRect.Y + dropRect.Height / 2;
     paw(g, cx, cy - 26, Color(230, 232, 150, 78));
-    text(g, L"把 .kurocat 皮肤拖到这里", 15, FontStyleBold, brown, RectF(dropRect.X, cy + 2, dropRect.Width, 24), StringAlignmentCenter);
-    text(g, L"也可以直接拖到桌面上的小猫身上 · 点这里选择文件", 11.5f, FontStyleRegular, Color(255, 160, 143, 130),
+    text(g, trW(L"把 .kurocat 皮肤拖到这里", L"Drag a .kurocat skin here", L"Arraste uma skin .kurocat para cá"), 15, FontStyleBold, brown, RectF(dropRect.X, cy + 2, dropRect.Width, 24), StringAlignmentCenter);
+    text(g, trW(L"也可以直接拖到桌面上的小猫身上 · 点这里选择文件",
+                L"Or drop it on the desktop cat · Click here to choose a file",
+                L"Ou solte no gatinho da área de trabalho · clique para escolher"), 11.5f, FontStyleRegular, Color(255, 160, 143, 130),
          RectF(dropRect.X, cy + 28, dropRect.Width, 20), StringAlignmentCenter);
 
     // Status + footer
@@ -1261,7 +1321,10 @@ void paint(AppState& app, HWND hwnd, HDC hdc) {
                       : app.dressingStatusKind == 2 ? Color(255, 194, 73, 59) : Color(255, 138, 123, 112);
     text(g, app.dressingStatusText, 12.5f, app.dressingStatusKind ? FontStyleBold : FontStyleRegular, statusColor,
          RectF(22, 390, 400, 42), StringAlignmentCenter);
-    text(g, (std::wstring(L"皮肤独立保存在 ") + SkinLibrary::dir() + L"（软件更新会自动保留）  ·  右键小猫 → 猫咪皮肤 可切换或备份").c_str(),
+    text(g, (std::wstring(trW(L"皮肤独立保存在 ", L"Skins are saved in ", L"Skins salvas em ")) + SkinLibrary::dir()
+             + trW(L"（软件更新会自动保留）  ·  右键小猫 → 猫咪皮肤 可切换或备份",
+                   L" (kept across updates)  ·  Right-click the cat → Cat Skin to switch or back up",
+                   L" (mantidas ao atualizar)  ·  Botão direito no gato → Skin do gato para trocar")).c_str(),
          10.0f, FontStyleRegular, Color(255, 179, 166, 155), RectF(18, 434, 408, 34), StringAlignmentCenter);
     (void)orange;
 
@@ -1285,7 +1348,7 @@ void paintButton(AppState& app, const DRAWITEMSTRUCT* di) {
     Font font(family(), 14.5f * k, FontStyleBold, UnitPixel);
     SolidBrush white(Color(255, 255, 255, 255));
     StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-    g.DrawString(L"选择文件…", -1, &font, RectF(0, 0, (REAL)w, (REAL)h), &fmt, &white);
+    g.DrawString(trW(L"选择文件…", L"Choose File…", L"Escolher arquivo…"), -1, &font, RectF(0, 0, (REAL)w, (REAL)h), &fmt, &white);
     if (di->itemState & ODS_FOCUS) {
         Pen ring(Color(120, 232, 150, 78), 2.0f);
         g.DrawPath(&ring, &pill);
@@ -1366,16 +1429,18 @@ void showDressingRoom(AppState& app) {
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
     RECT work = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    HWND win = CreateWindowExW(exStyle, DRESSING_ROOM_CLASS, L"换装间", style,
+    HWND win = CreateWindowExW(exStyle, DRESSING_ROOM_CLASS, trW(L"换装间", L"Dressing Room", L"Provador"), style,
         (work.left + work.right - w) / 2, (work.top + work.bottom - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.dressingRoom = win;
     allowDropsWhenElevated(win);
     DragAcceptFiles(win, TRUE);
     const Gdiplus::RectF& b = dressing::buttonRect;
-    CreateWindowExW(0, L"BUTTON", L"选择文件…", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+    CreateWindowExW(0, L"BUTTON", trW(L"选择文件…", L"Choose File…", L"Escolher arquivo…"), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                     px(b.X), px(b.Y), px(b.Width), px(b.Height), win, (HMENU)(INT_PTR)IDC_DRESSING_CHOOSE, inst, nullptr);
-    setDressingStatus(app, L"支持拖入多个文件；坏掉的文件会告诉你哪里不对。", 0);
+    setDressingStatus(app, trW(L"支持拖入多个文件；坏掉的文件会告诉你哪里不对。",
+                               L"You can drop several files at once; broken files will tell you what's wrong.",
+                               L"Dá para soltar vários arquivos; se algum estiver com problema, você verá o motivo."), 0);
     ShowWindow(win, SW_SHOWNORMAL);
     SetForegroundWindow(win);
 }
@@ -1440,7 +1505,7 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
         RegisterClassW(&wc);
         reg = true;
     }
-    bool en = app.settings.isEnglish;
+    auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
     RenameDialogState st;
     st.value = utf8ToWide(s->name);
 
@@ -1450,7 +1515,7 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
     HWND dlg = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
         clsName,
-        en ? L"Rename Skin" : L"重命名皮肤",
+        tr(L"重命名皮肤", L"Rename Skin", L"Renomear skin"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         sx, sy, w, h,
         app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd,
@@ -1460,13 +1525,13 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
 
     HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HWND lbl = CreateWindowExW(0, L"STATIC",
-        en ? L"Enter a new skin name (max 40 chars):" : L"请输入新的皮肤名称（最多 40 字）：",
+        tr(L"请输入新的皮肤名称（最多 40 字）：", L"Enter a new skin name (max 40 chars):", L"Novo nome da skin (máx. 40 caracteres):"),
         WS_CHILD | WS_VISIBLE, 18, 16, 316, 20, dlg, nullptr, inst, nullptr);
     st.editHwnd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st.value.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 18, 42, 316, 24, dlg, (HMENU)1001, inst, nullptr);
-    HWND okBtn = CreateWindowExW(0, L"BUTTON", en ? L"Save" : L"保存",
+    HWND okBtn = CreateWindowExW(0, L"BUTTON", tr(L"保存", L"Save", L"Salvar"),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 174, 80, 76, 26, dlg, (HMENU)IDOK, inst, nullptr);
-    HWND cancelBtn = CreateWindowExW(0, L"BUTTON", en ? L"Cancel" : L"取消",
+    HWND cancelBtn = CreateWindowExW(0, L"BUTTON", tr(L"取消", L"Cancel", L"Cancelar"),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 258, 80, 76, 26, dlg, (HMENU)IDCANCEL, inst, nullptr);
     for (HWND c : {lbl, st.editHwnd, okBtn, cancelBtn}) SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(st.editHwnd, EM_SETLIMITTEXT, 40, 0);
@@ -1495,7 +1560,7 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
     std::string newId, err;
     if (!app.skins.rename(id, newNameUtf8, newId, err)) {
         MessageBoxW(app.menuOwnerHwnd, utf8ToWide(err).c_str(),
-                    en ? L"Rename Failed" : L"重命名失败", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+                    tr(L"重命名失败", L"Rename Failed", L"Falha ao renomear"), MB_OK | MB_ICONWARNING | MB_TOPMOST);
         return false;
     }
     if (app.settings.customSkin == id) {
@@ -1510,12 +1575,15 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
 void confirmDeleteSkin(AppState& app, const std::string& id) {
     const SkinSpec* s = app.skins.find(id);
     if (!s) return;
-    std::wstring q = L"删除皮肤「" + utf8ToWide(s->name) + L"」？\n\n会从皮肤文件夹里删除这个文件，删除后需要重新导入。";
+    std::wstring q = trW(L"删除皮肤「", L"Delete the skin “", L"Excluir a skin “") + utf8ToWide(s->name)
+        + trW(L"」？\n\n会从皮肤文件夹里删除这个文件，删除后需要重新导入。",
+              L"”?\n\nThe file will be removed from the skins folder; you'll have to import it again to get it back.",
+              L"”?\n\nO arquivo será apagado da pasta de skins; para usá-la de novo, será preciso importá-la outra vez.");
     if (MessageBoxW(app.menuOwnerHwnd, q.c_str(), L"KuroCat", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND | MB_DEFBUTTON2) != IDYES) return;
     std::string removing = id;
     if (!app.skins.remove(removing)) {
-        MessageBoxW(app.menuOwnerHwnd, (L"无法删除 " + SkinLibrary::dir() + L"\\" + utf8ToWide(removing) + L".kurocat").c_str(),
-                    L"删除失败", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        MessageBoxW(app.menuOwnerHwnd, (trW(L"无法删除 ", L"Couldn't delete ", L"Não foi possível excluir ") + SkinLibrary::dir() + L"\\" + utf8ToWide(removing) + L".kurocat").c_str(),
+                    trW(L"删除失败", L"Delete Failed", L"Falha ao excluir"), MB_OK | MB_ICONWARNING | MB_TOPMOST);
         return;
     }
     if (app.settings.customSkin == removing) { app.settings.customSkin.clear(); app.settings.saveToRegistry(); }
@@ -1526,12 +1594,15 @@ void confirmDeleteSkin(AppState& app, const std::string& id) {
 void confirmDeleteKeyboardSkin(AppState& app, const std::string& id) {
     const KeyboardSkinSpec* kb = app.kbLibrary.find(id);
     if (!kb) return;
-    std::wstring q = L"\u5220\u9664\u952E\u76D8\u76AE\u80A4\u300C" + utf8ToWide(kb->name) + L"\u300D\uFF1F\n\n\u4F1A\u4ECE\u952E\u76D8\u76AE\u80A4\u6587\u4EF6\u5939\u91CC\u5220\u9664\u8FD9\u4E2A\u6587\u4EF6\uFF0C\u5220\u9664\u540E\u9700\u8981\u91CD\u65B0\u5BFC\u5165\u3002";
+    std::wstring q = trW(L"删除键盘皮肤「", L"Delete the keyboard skin “", L"Excluir a skin de teclado “") + utf8ToWide(kb->name)
+        + trW(L"」？\n\n会从键盘皮肤文件夹里删除这个文件，删除后需要重新导入。",
+              L"”?\n\nThe file will be removed from the keyboard skins folder; you'll have to import it again to get it back.",
+              L"”?\n\nO arquivo será apagado da pasta de skins de teclado; para usá-la de novo, será preciso importá-la outra vez.");
     if (MessageBoxW(app.menuOwnerHwnd, q.c_str(), L"KuroCat", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND | MB_DEFBUTTON2) != IDYES) return;
     std::string removing = id;
     if (!app.kbLibrary.remove(removing)) {
-        MessageBoxW(app.menuOwnerHwnd, (L"\u65E0\u6CD5\u5220\u9664 " + KeyboardSkinLibrary::directory() + L"\\" + utf8ToWide(removing) + L".kurokb").c_str(),
-                    L"\u5220\u9664\u5931\u8D25", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        MessageBoxW(app.menuOwnerHwnd, (trW(L"无法删除 ", L"Couldn't delete ", L"Não foi possível excluir ") + KeyboardSkinLibrary::directory() + L"\\" + utf8ToWide(removing) + L".kurokb").c_str(),
+                    trW(L"删除失败", L"Delete Failed", L"Falha ao excluir"), MB_OK | MB_ICONWARNING | MB_TOPMOST);
         return;
     }
     if (app.settings.customKeyboard == removing) { app.settings.customKeyboard.clear(); app.settings.saveToRegistry(); }
@@ -1611,20 +1682,19 @@ void rebuildCombosAndSync(AppState& app) {
     HWND hwnd = app.settingsWnd;
     if (!hwnd) return;
     app.settingsUpdating = true;
-    bool en = app.settings.isEnglish;
-    auto tr = [&](const wchar_t* zh, const wchar_t* eng) -> const wchar_t* { return en ? eng : zh; };
+    auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
 
     // Coat / Skin combo (6 built-in + imported)
     HWND coatCb = GetDlgItem(hwnd, ID_COAT_COMBO);
     if (coatCb) {
         SendMessageW(coatCb, CB_RESETCONTENT, 0, 0);
         const wchar_t* builtins[6] = {
-            tr(L"\u7ECF\u5178\u5C0F\u9ED1\u732B", L"Classic Black Cat"),
-            tr(L"\u6316\u7164\u66B9\u7F57\u732B", L"Siamese Cat"),
-            tr(L"\u7F8E\u77ED\u94F6\u864E\u6591", L"Silver Tabby Shorthair"),
-            tr(L"\u6A58\u767D\u732B", L"Orange & White Cat"),
-            tr(L"\u5446\u732B", L"Dazed Cat"),
-            tr(L"\u72F8\u82B1\u732B", L"Tabby Cat")
+            tr(L"\u7ECF\u5178\u5C0F\u9ED1\u732B", L"Classic Black Cat", L"Gatinho preto clássico"),
+            tr(L"\u6316\u7164\u66B9\u7F57\u732B", L"Siamese Cat", L"Gato siamês"),
+            tr(L"\u7F8E\u77ED\u94F6\u864E\u6591", L"Silver Tabby Shorthair", L"Pelo curto tigrado prateado"),
+            tr(L"\u6A58\u767D\u732B", L"Orange & White Cat", L"Gato laranja e branco"),
+            tr(L"\u5446\u732B", L"Dazed Cat", L"Gato atordoado"),
+            tr(L"\u72F8\u82B1\u732B", L"Tabby Cat", L"Gato tigrado")
         };
         for (int i = 0; i < 6; ++i) SendMessageW(coatCb, CB_ADDSTRING, 0, (LPARAM)builtins[i]);
         int sel = (int)app.settings.coatTheme;
@@ -1648,13 +1718,13 @@ void rebuildCombosAndSync(AppState& app) {
     if (eyeCb) {
         SendMessageW(eyeCb, CB_RESETCONTENT, 0, 0);
         const wchar_t* eyes[7] = {
-            tr(L"\u8367\u5149\u9EC4\u7EFF", L"Neon Chartreuse"),
-            tr(L"\u66B9\u7F57\u5B9D\u77F3\u84DD", L"Siamese Ice Blue"),
-            tr(L"\u7425\u73C0\u91D1\u77B3", L"Warm Amber"),
-            tr(L"\u51B0\u6676\u6D45\u84DD", L"Ice Cyan"),
-            tr(L"\u67D4\u548C\u7425\u73C0", L"Soft Amber"),
-            tr(L"\u6DE1\u91D1\u9752\u7EFF", L"Golden Hazel"),
-            tr(L"\u6A44\u6984\u91D1", L"Olive Gold")
+            tr(L"\u8367\u5149\u9EC4\u7EFF", L"Neon Chartreuse", L"Verde-limão neon"),
+            tr(L"\u66B9\u7F57\u5B9D\u77F3\u84DD", L"Siamese Ice Blue", L"Azul siamês"),
+            tr(L"\u7425\u73C0\u91D1\u77B3", L"Warm Amber", L"Âmbar quente"),
+            tr(L"\u51B0\u6676\u6D45\u84DD", L"Ice Cyan", L"Ciano gelo"),
+            tr(L"\u67D4\u548C\u7425\u73C0", L"Soft Amber", L"Âmbar suave"),
+            tr(L"\u6DE1\u91D1\u9752\u7EFF", L"Golden Hazel", L"Avelã dourado"),
+            tr(L"\u6A44\u6984\u91D1", L"Olive Gold", L"Dourado oliva")
         };
         for (int i = 0; i < 7; ++i) SendMessageW(eyeCb, CB_ADDSTRING, 0, (LPARAM)eyes[i]);
         SendMessageW(eyeCb, CB_SETCURSEL, (WPARAM)(int)app.settings.eyeTheme, 0);
@@ -1666,9 +1736,9 @@ void rebuildCombosAndSync(AppState& app) {
     if (kbCb) {
         SendMessageW(kbCb, CB_RESETCONTENT, 0, 0);
         const wchar_t* kbs[3] = {
-            tr(L"\u7ECF\u5178\u5976\u767D\u6696\u9EC4", L"Classic Milk White"),
-            tr(L"\u6697\u591C\u6781\u5BA2\u9ED1", L"Midnight Hacker Black"),
-            tr(L"\u590D\u53E4\u5976\u6CB9\u7070", L"Retro Cream Gray")
+            tr(L"\u7ECF\u5178\u5976\u767D\u6696\u9EC4", L"Classic Milk White", L"Branco leite clássico"),
+            tr(L"\u6697\u591C\u6781\u5BA2\u9ED1", L"Midnight Hacker Black", L"Preto hacker da meia-noite"),
+            tr(L"\u590D\u53E4\u5976\u6CB9\u7070", L"Retro Cream Gray", L"Cinza creme retrô")
         };
         for (int i = 0; i < 3; ++i) SendMessageW(kbCb, CB_ADDSTRING, 0, (LPARAM)kbs[i]);
         int sel = (int)app.settings.keyboardTheme;
@@ -1722,7 +1792,7 @@ void rebuildCombosAndSync(AppState& app) {
     SendMessageW(GetDlgItem(hwnd, ID_TYPING_LIMB_COMBO), CB_SETCURSEL, (WPARAM)limbIdx, 0);
     SendMessageW(GetDlgItem(hwnd, ID_TABLET_COMBO), CB_SETCURSEL, (WPARAM)app.settings.tabletMode, 0);
     SendMessageW(GetDlgItem(hwnd, ID_OBS_COMBO), CB_SETCURSEL, (WPARAM)app.settings.obsCaptureMode, 0);
-    SendMessageW(GetDlgItem(hwnd, ID_LANG_COMBO), CB_SETCURSEL, (WPARAM)(app.settings.isEnglish ? 1 : 0), 0);
+    SendMessageW(GetDlgItem(hwnd, ID_LANG_COMBO), CB_SETCURSEL, (WPARAM)std::clamp(app.settings.language, 0, 2), 0);
 
     if (HWND hDir = GetDlgItem(hwnd, ID_SKINS_DIR_PATH)) {
         SetWindowTextW(hDir, SkinLibrary::dir().c_str());
@@ -1816,6 +1886,33 @@ void showSettingsWindow(AppState& app);
 void refreshSettingsWindow(AppState& app) {
     if (app.settingsWnd && IsWindow(app.settingsWnd)) {
         settings_ui::rebuildCombosAndSync(app);
+    }
+}
+
+// Switches the UI language (0 = Chinese, 1 = English, 2 = Portuguese), persists it and
+// re-labels whatever is open: tray tooltip, settings window (rebuilt) and the dressing room.
+void applyUiLanguage(AppState& app, int lang) {
+    lang = std::clamp(lang, 0, 2);
+    app.settings.language = lang;
+    kurocat::setUiLanguage(static_cast<kurocat::UiLanguage>(lang));
+    app.settings.saveToRegistry();
+
+    wcscpy_s(app.nid.szTip, trayTipText());
+    NOTIFYICONDATAW tip = app.nid;
+    tip.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &tip);
+
+    if (app.dressingRoom) {
+        SetWindowTextW(app.dressingRoom, trW(L"换装间", L"Dressing Room", L"Provador"));
+        if (HWND btn = GetDlgItem(app.dressingRoom, IDC_DRESSING_CHOOSE))
+            SetWindowTextW(btn, trW(L"选择文件…", L"Choose File…", L"Escolher arquivo…"));
+        setDressingStatus(app, trW(L"支持拖入多个文件；坏掉的文件会告诉你哪里不对。",
+                                   L"You can drop several files at once; broken files will tell you what's wrong.",
+                                   L"Dá para soltar vários arquivos; se algum estiver com problema, você verá o motivo."), 0);
+    }
+    if (app.settingsWnd && IsWindow(app.settingsWnd)) {
+        DestroyWindow(app.settingsWnd);
+        showSettingsWindow(app);
     }
 }
 
@@ -1966,13 +2063,9 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     app->settings.saveToRegistry();
                     applyOBSMode(*app);
                     refreshSettingsWindow(*app);
-                } else if (id == ID_LANG_COMBO) {
-                    bool newEn = (sel == 1);
-                    if (newEn != app->settings.isEnglish) {
-                        app->settings.isEnglish = newEn;
-                        app->settings.saveToRegistry();
-                        DestroyWindow(hwnd);
-                        showSettingsWindow(*app);
+                } else if (id == ID_LANG_COMBO && sel >= 0 && sel <= 2) {
+                    if (sel != app->settings.language) {
+                        applyUiLanguage(*app, sel);   // rebuilds this window in the new language
                     }
                 }
                 return 0;
@@ -2064,8 +2157,12 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         app->settings.saveToRegistry();
                         if (app->settings.fullClickThrough) {
                             showTrayBalloon(*app,
-                                L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
-                                L"\u53D6\u6D88\u65B9\u5F0F\uFF1A\u6309 Ctrl+Alt+Shift+P\uFF0C\u6216\u6309\u4F4F Alt \u952E\u53F3\u952E\u5C0F\u732B\uFF0C\u6216\u70B9\u53F3\u4E0B\u89D2\u6258\u76D8\u56FE\u6807");
+                                app->settings.tr(L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
+                                                 L"KuroCat full click-through is on",
+                                                 L"KuroCat: ignorar cliques ativado"),
+                                app->settings.tr(L"\u53D6\u6D88\u65B9\u5F0F\uFF1A\u6309 Ctrl+Alt+Shift+P\uFF0C\u6216\u6309\u4F4F Alt \u952E\u53F3\u952E\u5C0F\u732B\uFF0C\u6216\u70B9\u53F3\u4E0B\u89D2\u6258\u76D8\u56FE\u6807",
+                                                 L"To turn it off: press Ctrl+Alt+Shift+P, hold Alt and right-click the cat, or click the tray icon.",
+                                                 L"Para desativar: pressione Ctrl+Alt+Shift+P, segure Alt e clique com o botão direito no gato ou clique no ícone da bandeja."));
                         }
                         break;
                     case ID_CHK_AUTOSTART:
@@ -2094,7 +2191,7 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     case ID_BTN_CHOOSE_SKINS_DIR: {
                         std::wstring chosen;
                         if (settings_ui::pickFolderDialog(hwnd,
-                                app->settings.isEnglish ? L"Choose Skins Folder" : L"\u9009\u62E9\u76AE\u80A4\u6587\u4EF6\u5939",
+                                app->settings.tr(L"\u9009\u62E9\u76AE\u80A4\u6587\u4EF6\u5939", L"Choose Skins Folder", L"Escolher pasta de skins"),
                                 SkinLibrary::dir(), chosen)) {
                             applySkinsDirectory(*app, chosen);
                         }
@@ -2158,8 +2255,7 @@ void showSettingsWindow(AppState& app) {
     app.settingsBoldFont = CreateFontW(-px(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
-    bool en = app.settings.isEnglish;
-    auto tr = [&](const wchar_t* zh, const wchar_t* eng) -> const wchar_t* { return en ? eng : zh; };
+    auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
 
     const int W = 540, H = 710;
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
@@ -2169,7 +2265,7 @@ void showSettingsWindow(AppState& app) {
     RECT work = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     HWND win = CreateWindowExW(0, SETTINGS_WINDOW_CLASS,
-        tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings"), style,
+        tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings", L"Configurações do KuroCat"), style,
         (work.left + work.right - winW) / 2, (work.top + work.bottom - winH) / 2,
         winW, winH, nullptr, nullptr, inst, nullptr);
     if (!win) return;
@@ -2185,91 +2281,92 @@ void showSettingsWindow(AppState& app) {
 
     using namespace settings_ui;
     // Section 1: Appearance & Orientation
-    addCtrl(L"BUTTON", tr(L"\u5916\u89C2\u4E0E\u65B9\u5411", L"Appearance & Orientation"), BS_GROUPBOX, 14, 10, 512, 264, 0, true);
+    addCtrl(L"BUTTON", tr(L"\u5916\u89C2\u4E0E\u65B9\u5411", L"Appearance & Orientation", L"Aparência e orientação"), BS_GROUPBOX, 14, 10, 512, 264, 0, true);
 
-    addCtrl(L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin"), SS_LEFT, 28, 38, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin", L"Skin do gato"), SS_LEFT, 28, 38, 76, 20, 0);
     addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 34, 186, 220, ID_COAT_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4\u2026", L"Wardrobe"), BS_PUSHBUTTON | WS_TABSTOP, 302, 34, 74, 24, ID_BTN_DRESSING);
-    addCtrl(L"BUTTON", tr(L"\u270F \u6539\u540D", L"\u270F Name"), BS_PUSHBUTTON | WS_TABSTOP, 380, 34, 62, 24, ID_BTN_RENAME_SKIN);
-    addCtrl(L"BUTTON", tr(L"\U0001F5D1 \u5220\u9664", L"\U0001F5D1 Del"), BS_OWNERDRAW | WS_TABSTOP, 446, 34, 66, 24, ID_BTN_DEL_SKIN, true);
+    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4\u2026", L"Wardrobe", L"Provador"), BS_PUSHBUTTON | WS_TABSTOP, 302, 34, 74, 24, ID_BTN_DRESSING);
+    addCtrl(L"BUTTON", tr(L"\u270F \u6539\u540D", L"\u270F Name", L"✏ Nome"), BS_PUSHBUTTON | WS_TABSTOP, 380, 34, 62, 24, ID_BTN_RENAME_SKIN);
+    addCtrl(L"BUTTON", tr(L"\U0001F5D1 \u5220\u9664", L"\U0001F5D1 Del", L"🗑"), BS_OWNERDRAW | WS_TABSTOP, 446, 34, 66, 24, ID_BTN_DEL_SKIN, true);
 
-    addCtrl(L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), SS_LEFT, 28, 70, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta"), SS_LEFT, 28, 70, 76, 20, 0);
     addCtrl(L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, 110, 70, 178, 20, ID_SKINS_DIR_PATH);
-    addCtrl(L"BUTTON", tr(L"\u9009\u62E9\u6587\u4EF6\u5939\u2026", L"Choose..."), BS_PUSHBUTTON | WS_TABSTOP, 292, 66, 100, 24, ID_BTN_CHOOSE_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u6253\u5F00", L"Open"), BS_PUSHBUTTON | WS_TABSTOP, 396, 66, 50, 24, ID_BTN_OPEN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset"), BS_PUSHBUTTON | WS_TABSTOP, 450, 66, 62, 24, ID_BTN_RESET_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u9009\u62E9\u6587\u4EF6\u5939\u2026", L"Choose...", L"Escolher…"), BS_PUSHBUTTON | WS_TABSTOP, 292, 66, 100, 24, ID_BTN_CHOOSE_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u6253\u5F00", L"Open", L"Abrir"), BS_PUSHBUTTON | WS_TABSTOP, 396, 66, 50, 24, ID_BTN_OPEN_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset", L"Padrão"), BS_PUSHBUTTON | WS_TABSTOP, 450, 66, 62, 24, ID_BTN_RESET_SKINS_DIR);
 
-    addCtrl(L"STATIC", tr(L"\u77B3\u8272\u5207\u6362", L"Eye Color"), SS_LEFT, 28, 102, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u77B3\u8272\u5207\u6362", L"Eye Color", L"Olhos"), SS_LEFT, 28, 102, 76, 20, 0);
     addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 98, 290, 220, ID_EYE_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box"), BS_PUSHBUTTON | WS_TABSTOP, 410, 98, 102, 24, ID_BTN_EDIT_MODE);
+    addCtrl(L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box", L"Redimensionar"), BS_PUSHBUTTON | WS_TABSTOP, 410, 98, 102, 24, ID_BTN_EDIT_MODE);
 
-    addCtrl(L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard"), SS_LEFT, 28, 134, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard", L"Teclado"), SS_LEFT, 28, 134, 76, 20, 0);
     addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 130, 290, 220, ID_KB_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u952E\u76D8\u2026", L"Import..."), BS_PUSHBUTTON | WS_TABSTOP, 410, 130, 102, 24, ID_BTN_IMPORT_KB);
+    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u952E\u76D8\u2026", L"Import...", L"Importar…"), BS_PUSHBUTTON | WS_TABSTOP, 410, 130, 102, 24, ID_BTN_IMPORT_KB);
 
-    addCtrl(L"STATIC", tr(L"\u7F29\u653E\u5927\u5C0F", L"Pet Scale"), SS_LEFT, 28, 168, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u7F29\u653E\u5927\u5C0F", L"Pet Scale", L"Tamanho"), SS_LEFT, 28, 168, 76, 20, 0);
     HWND scaleSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 168, 290, 18, ID_SCALE_SCROLL);
     SetScrollRange(scaleSb, SB_CTL, 45, 250, FALSE);
     addCtrl(L"STATIC", L"100%", SS_RIGHT, 410, 168, 48, 20, ID_SCALE_VAL);
 
-    addCtrl(L"STATIC", tr(L"\u671D\u5411\u89D2\u5EA6", L"Rotation"), SS_LEFT, 28, 200, 76, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u671D\u5411\u89D2\u5EA6", L"Rotation", L"Rotação"), SS_LEFT, 28, 200, 76, 20, 0);
     HWND rotSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 200, 290, 18, ID_ROT_SCROLL);
     SetScrollRange(rotSb, SB_CTL, -180, 180, FALSE);
     addCtrl(L"STATIC", L"0\u00B0", SS_RIGHT, 408, 200, 42, 20, ID_ROT_VAL);
-    addCtrl(L"BUTTON", tr(L"\u5F52\u96F6", L"0\u00B0"), BS_PUSHBUTTON | WS_TABSTOP, 458, 196, 54, 24, ID_BTN_ROT_ZERO);
+    addCtrl(L"BUTTON", tr(L"\u5F52\u96F6", L"0\u00B0", L"0°"), BS_PUSHBUTTON | WS_TABSTOP, 458, 196, 54, 24, ID_BTN_ROT_ZERO);
 
-    addCtrl(L"BUTTON", tr(L"\u6C34\u5E73\u7FFB\u8F6C", L"Flip Horizontal"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 234, 140, 22, ID_CHK_FLIP);
-    addCtrl(L"BUTTON", tr(L"\u767D\u8272\u8D34\u7EB8\u63CF\u8FB9", L"White Sticker Outline"), BS_AUTOCHECKBOX | WS_TABSTOP, 180, 234, 180, 22, ID_CHK_OUTLINE);
-    addCtrl(L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E\u4E0E\u671D\u5411", L"Reset Pose"), BS_PUSHBUTTON | WS_TABSTOP, 384, 232, 128, 24, ID_BTN_RESET_POS);
+    addCtrl(L"BUTTON", tr(L"\u6C34\u5E73\u7FFB\u8F6C", L"Flip Horizontal", L"Espelhar imagem"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 234, 140, 22, ID_CHK_FLIP);
+    addCtrl(L"BUTTON", tr(L"\u767D\u8272\u8D34\u7EB8\u63CF\u8FB9", L"White Sticker Outline", L"Contorno branco (adesivo)"), BS_AUTOCHECKBOX | WS_TABSTOP, 180, 234, 180, 22, ID_CHK_OUTLINE);
+    addCtrl(L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E\u4E0E\u671D\u5411", L"Reset Pose", L"Redefinir posição"), BS_PUSHBUTTON | WS_TABSTOP, 384, 232, 128, 24, ID_BTN_RESET_POS);
 
     // Section 2: Interaction & Effects
-    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8\u4E0E\u7279\u6548", L"Interaction & Effects"), BS_GROUPBOX, 14, 284, 512, 208, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 310, 236, 22, ID_CHK_DRAG_ANIM);
-    addCtrl(L"BUTTON", tr(L"\u9AD8\u901F\u6253\u5B57\u751F\u6C14\u8868\u60C5", L"Angry Expression on Fast Typing"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 310, 236, 22, ID_CHK_ANGER);
-    addCtrl(L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 338, 236, 22, ID_CHK_PET);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Keyboard Key Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 338, 236, 22, ID_CHK_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB", L"Show Mouse Click Badges"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 366, 236, 22, ID_CHK_MOUSE_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 366, 236, 22, ID_CHK_LEGENDS);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 394, 236, 22, ID_CHK_MARQUEE);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 394, 236, 22, ID_CHK_LEVEL_KEYBOARD);
+    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8\u4E0E\u7279\u6548", L"Interaction & Effects", L"Interação e efeitos"), BS_GROUPBOX, 14, 284, 512, 208, 0, true);
+    addCtrl(L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation", L"Animação de erguer ao arrastar"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 310, 236, 22, ID_CHK_DRAG_ANIM);
+    addCtrl(L"BUTTON", tr(L"\u9AD8\u901F\u6253\u5B57\u751F\u6C14\u8868\u60C5", L"Angry Expression on Fast Typing", L"Cara brava ao digitar rápido"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 310, 236, 22, ID_CHK_ANGER);
+    addCtrl(L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles", L"Carinho e brilho do ronronar"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 338, 236, 22, ID_CHK_PET);
+    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Keyboard Key Badges", L"Mostrar balões das teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 338, 236, 22, ID_CHK_BADGES);
+    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB", L"Show Mouse Click Badges", L"Mostrar cliques do mouse"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 366, 236, 22, ID_CHK_MOUSE_BADGES);
+    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends", L"Mostrar letras nas teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 366, 236, 22, ID_CHK_LEGENDS);
+    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee", L"Luz RGB animada no teclado"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 394, 236, 22, ID_CHK_MARQUEE);
+    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard", L"Teclado nivelado"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 394, 236, 22, ID_CHK_LEVEL_KEYBOARD);
 
-    addCtrl(L"STATIC", tr(L"\u591A\u952E\u6253\u5B57", L"Multi-Key"), SS_LEFT, 28, 426, 90, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u591A\u952E\u6253\u5B57", L"Multi-Key", L"Várias teclas"), SS_LEFT, 28, 426, 90, 20, 0);
     HWND limbCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 422, 388, 140, ID_TYPING_LIMB_COMBO);
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u7B2C\u4E09\u53EA\u811A\u6253\u5B57\uFF08\u4EC5\u540E\u811A\uFF09", L"3rd Hind Foot Only"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u5C3E\u5DF4\u6253\u5B57\uFF08\u4EC5\u5C3E\u5DF4\uFF09", L"Tail Typing Only"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u53EA\u7528\u4E24\u53EA\u722A\u722A\u6253\u5B57", L"Two Front Paws Only"));
+    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)", L"Pata traseira + cauda (3 / 4 teclas)"));
+    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u7B2C\u4E09\u53EA\u811A\u6253\u5B57\uFF08\u4EC5\u540E\u811A\uFF09", L"3rd Hind Foot Only", L"Só a pata traseira"));
+    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u5C3E\u5DF4\u6253\u5B57\uFF08\u4EC5\u5C3E\u5DF4\uFF09", L"Tail Typing Only", L"Só a cauda"));
+    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u53EA\u7528\u4E24\u53EA\u722A\u722A\u6253\u5B57", L"Two Front Paws Only", L"Só as duas patas da frente"));
 
-    addCtrl(L"STATIC", tr(L"\u6570\u4F4D\u677F\u6A21\u5F0F", L"Tablet Mode"), SS_LEFT, 28, 458, 90, 20, 0);
+    addCtrl(L"STATIC", tr(L"\u6570\u4F4D\u677F\u6A21\u5F0F", L"Tablet Mode", L"Mesa e caneta"), SS_LEFT, 28, 458, 90, 20, 0);
     HWND tabCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 454, 388, 120, ID_TABLET_COMBO);
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B\uFF08\u8FDE\u63A5\u6570\u4F4D\u677F\u65F6\u81EA\u52A8\u5207\u6362\uFF09", L"Auto-Detect (Switch When Connected)"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Always Show Tablet & Stylus"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse"));
+    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B\uFF08\u8FDE\u63A5\u6570\u4F4D\u677F\u65F6\u81EA\u52A8\u5207\u6362\uFF09", L"Auto-Detect (Switch When Connected)", L"Detectar automaticamente (ao conectar a mesa)"));
+    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Always Show Tablet & Stylus", L"Sempre mostrar mesa e caneta"));
+    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse", L"Sempre mostrar mouse"));
 
     // Section 3: Window & System
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System"), BS_GROUPBOX, 14, 502, 512, 194, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
-    addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
-    addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
-    addCtrl(L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 556, 236, 22, ID_CHK_AUTOSTART);
-    addCtrl(L"BUTTON", tr(L"\u59CB\u7EC8\u4EE5\u7BA1\u7406\u5458\u8EAB\u4EFD\u8FD0\u884C", L"Always Run as Administrator"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 584, 236, 22, ID_CHK_RUN_ADMIN);
-    addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin")
-                                      : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin"),
+    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System", L"Janela e sistema"), BS_GROUPBOX, 14, 502, 512, 194, 0, true);
+    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top", L"Sempre no topo"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
+    addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen", L"Ocultar em apps de tela cheia"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
+    addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)", L"Ignorar cliques (segure Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
+    addCtrl(L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup", L"Abrir ao iniciar o Windows"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 556, 236, 22, ID_CHK_AUTOSTART);
+    addCtrl(L"BUTTON", tr(L"\u59CB\u7EC8\u4EE5\u7BA1\u7406\u5458\u8EAB\u4EFD\u8FD0\u884C", L"Always Run as Administrator", L"Sempre executar como admin"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 584, 236, 22, ID_CHK_RUN_ADMIN);
+    addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin", L"✓ Em modo admin")
+                                      : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin", L"Reiniciar como admin"),
             BS_PUSHBUTTON | WS_TABSTOP, 276, 582, 148, 24, ID_BTN_RELAUNCH_ADMIN);
 
-    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture"), SS_LEFT, 28, 618, 78, 20, 0);
+    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture", L"Captura OBS"), SS_LEFT, 28, 618, 78, 20, 0);
     HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 614, 210, 120, ID_OBS_COMBO);
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)"));
-    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 616, 180, 22, ID_CHK_OBS_HIDE);
+    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)", L"Desligado (normal)"));
+    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)", L"OBS transparente (WGC)"));
+    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)", L"OBS tela verde (universal)"));
+    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop", L"Ocultar na tela"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 616, 180, 22, ID_CHK_OBS_HIDE);
 
-    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language"), SS_LEFT, 28, 652, 78, 20, 0);
-    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 648, 150, 90, ID_LANG_COMBO);
+    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language", L"Idioma"), SS_LEFT, 28, 652, 78, 20, 0);
+    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 648, 150, 110, ID_LANG_COMBO);
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
-    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir"), BS_PUSHBUTTON | WS_TABSTOP, 290, 648, 106, 24, ID_BTN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir"), BS_PUSHBUTTON | WS_TABSTOP, 406, 648, 106, 24, ID_BTN_KB_DIR);
+    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"Português");
+    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta de skins"), BS_PUSHBUTTON | WS_TABSTOP, 270, 648, 116, 24, ID_BTN_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir", L"Pasta de teclados"), BS_PUSHBUTTON | WS_TABSTOP, 392, 648, 120, 24, ID_BTN_KB_DIR);
 
     settings_ui::rebuildCombosAndSync(app);
     ShowWindow(win, SW_SHOWNORMAL);
@@ -2278,25 +2375,29 @@ void showSettingsWindow(AppState& app) {
 
 void showContextMenu(AppState& app, POINT screenPt) {
     HMENU menu = CreatePopupMenu();
-    bool en = app.settings.isEnglish;
-    auto tr = [&](const wchar_t* zh, const wchar_t* eng) -> const wchar_t* { return en ? eng : zh; };
+    auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
 
     // Status & live stats header
     std::wstring statusStr = app.input.isRawInputRegistered
         ? tr(L"\u25CF \u786C\u4EF6\u7EA7\u5168\u72B6\u6001\u76D1\u542C\u4E2D (Raw Input)",
-             L"\u25CF Hardware Input Active (Raw Input)")
-        : tr(L"\u26A0 Raw Input \u672A\u542F\u52A8", L"\u26A0 Raw Input Inactive");
+             L"\u25CF Hardware Input Active (Raw Input)", L"● Captura de hardware ativa (Raw Input)")
+        : tr(L"\u26A0 Raw Input \u672A\u542F\u52A8", L"\u26A0 Raw Input Inactive", L"⚠ Raw Input inativo");
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, statusStr.c_str());
     if (!app.isElevated && app.lastBlockedForegroundTime > 0.0 && nowSeconds() - app.lastBlockedForegroundTime < 600.0) {
         AppendMenuW(menu, MF_STRING, CMD_RELAUNCH_ADMIN,
             tr(L"\u26A0 \u68C0\u6D4B\u5230\u7BA1\u7406\u5458\u7A97\u53E3\u62E6\u622A\u952E\u76D8\uFF0C\u70B9\u6B64\u7BA1\u7406\u5458\u91CD\u542F",
-               L"\u26A0 Admin app blocked keys — Restart as Administrator"));
+               L"\u26A0 Admin app blocked keys — Restart as Administrator", L"⚠ App de administrador bloqueou as teclas — reiniciar como administrador"));
     }
 
-    std::wstring stats = en
+    const int lang = app.settings.language;
+    std::wstring stats = lang == 1
         ? (L"Today " + std::to_wstring(app.input.totalKeystrokesToday)
             + L"  \u00B7  KPM " + std::to_wstring(app.input.currentKPM())
             + L"  \u00B7  Pets " + std::to_wstring(app.physics.totalPetSessions))
+        : lang == 2
+        ? (L"Hoje " + std::to_wstring(app.input.totalKeystrokesToday)
+            + L"  \u00B7  KPM " + std::to_wstring(app.input.currentKPM())
+            + L"  \u00B7  Carinhos " + std::to_wstring(app.physics.totalPetSessions))
         : (L"\u4ECA\u65E5\u51FB\u952E " + std::to_wstring(app.input.totalKeystrokesToday)
             + L"  \u00B7  KPM " + std::to_wstring(app.input.currentKPM())
             + L"  \u00B7  \u6478\u732B " + std::to_wstring(app.physics.totalPetSessions) + L" \u6B21");
@@ -2304,18 +2405,18 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Essential quick actions
-    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE, app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet") : tr(L"\u663E\u793A\u684C\u5BA0", L"Show Pet"));
+    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE, app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet", L"Ocultar gatinho") : tr(L"\u663E\u793A\u684C\u5BA0", L"Show Pet", L"Mostrar gatinho"));
 
     // Quick Cat Skin switcher
     HMENU coatMenu = CreatePopupMenu();
     bool customActive = app.skins.find(app.settings.customSkin) != nullptr;
     auto coatCheck = [&](CatCoatTheme c) -> UINT { return !customActive && app.settings.coatTheme == c ? MF_CHECKED : 0; };
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::ClassicBlack), CMD_COAT_BLACK, tr(L"\u7ECF\u5178\u5C0F\u9ED1\u732B (\u539F\u7248)", L"Classic Black Cat"));
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Siamese), CMD_COAT_SIAMESE, tr(L"\u6316\u7164\u66B9\u7F57\u732B", L"Siamese Cat"));
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Shorthair), CMD_COAT_SHORTHAIR, tr(L"\u7F8E\u77ED\uFF08\u94F6\u864E\u6591\u52A0\u767D\uFF09", L"Silver Tabby Shorthair"));
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::OrangeWhite), CMD_COAT_ORANGE_WHITE, tr(L"\u6A58\u767D\u732B", L"Orange & White Cat"));
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Dazed), CMD_COAT_DAZED, tr(L"\u5446\u732B", L"Dazed Cat"));
-    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Tabby), CMD_COAT_TABBY, tr(L"\u72F8\u82B1\u732B", L"Tabby Cat"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::ClassicBlack), CMD_COAT_BLACK, tr(L"\u7ECF\u5178\u5C0F\u9ED1\u732B (\u539F\u7248)", L"Classic Black Cat", L"Gatinho preto clássico"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Siamese), CMD_COAT_SIAMESE, tr(L"\u6316\u7164\u66B9\u7F57\u732B", L"Siamese Cat", L"Gato siamês"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Shorthair), CMD_COAT_SHORTHAIR, tr(L"\u7F8E\u77ED\uFF08\u94F6\u864E\u6591\u52A0\u767D\uFF09", L"Silver Tabby Shorthair", L"Pelo curto tigrado prateado"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::OrangeWhite), CMD_COAT_ORANGE_WHITE, tr(L"\u6A58\u767D\u732B", L"Orange & White Cat", L"Gato laranja e branco"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Dazed), CMD_COAT_DAZED, tr(L"\u5446\u732B", L"Dazed Cat", L"Gato atordoado"));
+    AppendMenuW(coatMenu, MF_STRING | coatCheck(CatCoatTheme::Tabby), CMD_COAT_TABBY, tr(L"\u72F8\u82B1\u732B", L"Tabby Cat", L"Gato tigrado"));
     size_t listed = std::min<size_t>(app.skins.skins.size(), CMD_SKIN_RANGE);
     if (listed) AppendMenuW(coatMenu, MF_SEPARATOR, 0, nullptr);
     for (size_t i = 0; i < listed; ++i) {
@@ -2332,41 +2433,48 @@ void showContextMenu(AppState& app, POINT screenPt) {
             AppendMenuW(renameMenu, MF_STRING, CMD_SKIN_RENAME_BASE + (UINT)i, (L"\u270F " + label).c_str());
             AppendMenuW(deleteMenu, MF_STRING, CMD_SKIN_DELETE_BASE + (UINT)i, (L"\U0001F5D1 " + label).c_str());
         }
-        AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)renameMenu, tr(L"\u270F \u91CD\u547D\u540D\u76AE\u80A4\u2026", L"\u270F Rename Skin..."));
-        AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)deleteMenu, tr(L"\U0001F5D1 \u5220\u9664\u5DF2\u5BFC\u5165\u76AE\u80A4\u2026", L"\U0001F5D1 Delete Imported Skin..."));
+        AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)renameMenu, tr(L"\u270F \u91CD\u547D\u540D\u76AE\u80A4\u2026", L"\u270F Rename Skin...", L"✏ Renomear skin…"));
+        AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)deleteMenu, tr(L"\U0001F5D1 \u5220\u9664\u5DF2\u5BFC\u5165\u76AE\u80A4\u2026", L"\U0001F5D1 Delete Imported Skin...", L"🗑 Excluir skin importada…"));
     }
     AppendMenuW(coatMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(coatMenu, MF_STRING, CMD_IMPORT_SKIN, tr(L"\u5BFC\u5165\u76AE\u80A4 / \u6362\u88C5\u95F4\u2026", L"Import Skin / Wardrobe..."));
-    AppendMenuW(coatMenu, MF_STRING, CMD_OPEN_WORKSHOP, tr(L"\u6253\u5F00\u76AE\u80A4\u5DE5\u574A\u2026", L"Open Skin Workshop..."));
-    AppendMenuW(menu, MF_POPUP, (UINT_PTR)coatMenu, tr(L"\u732B\u54AA\u76AE\u80A4 \U0001F431", L"Cat Skin \U0001F431"));
+    AppendMenuW(coatMenu, MF_STRING, CMD_IMPORT_SKIN, tr(L"\u5BFC\u5165\u76AE\u80A4 / \u6362\u88C5\u95F4\u2026", L"Import Skin / Wardrobe...", L"Importar skin / Provador…"));
+    AppendMenuW(coatMenu, MF_STRING, CMD_OPEN_WORKSHOP, tr(L"\u6253\u5F00\u76AE\u80A4\u5DE5\u574A\u2026", L"Open Skin Workshop...", L"Abrir oficina de skins…"));
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)coatMenu, tr(L"\u732B\u54AA\u76AE\u80A4 \U0001F431", L"Cat Skin \U0001F431", L"Skin do gato 🐱"));
 
     // Skin Workshop (Create custom skins) right on the top-level menu
     AppendMenuW(menu, MF_STRING, CMD_OPEN_WORKSHOP,
         tr(L"\U0001F3A8 \u76AE\u80A4\u5DE5\u574A\uFF08\u5236\u4F5C\u76AE\u80A4\uFF09\u2026",
-           L"\U0001F3A8 Skin Workshop (Create Skins)..."));
+           L"\U0001F3A8 Skin Workshop (Create Skins)...", L"🎨 Oficina de skins (criar skins)…"));
 
     AppendMenuW(menu, MF_STRING, CMD_OPEN_WEBSITE,
         tr(L"\U0001F310 \u8F6F\u4EF6\u5B98\u7F51 (kurocat.cc)",
-           L"\U0001F310 Website (kurocat.cc)"));
+           L"\U0001F310 Website (kurocat.cc)", L"🌐 Site oficial (kurocat.cc)"));
 
     AppendMenuW(menu, MF_STRING | (app.settings.levelKeyboard ? MF_CHECKED : 0), CMD_TOGGLE_LEVEL_KEYBOARD,
-        tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard"));
+        tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard", L"Teclado nivelado (paralelo à tela)"));
+
+    // Language switcher (labels stay readable whatever the current language is)
+    HMENU langMenu = CreatePopupMenu();
+    AppendMenuW(langMenu, MF_STRING | (app.settings.language == 0 ? MF_CHECKED : 0), CMD_LANG_ZH, L"\u7B80\u4F53\u4E2D\u6587");
+    AppendMenuW(langMenu, MF_STRING | (app.settings.language == 1 ? MF_CHECKED : 0), CMD_LANG_EN, L"English");
+    AppendMenuW(langMenu, MF_STRING | (app.settings.language == 2 ? MF_CHECKED : 0), CMD_LANG_PT, L"Português (Brasil)");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)langMenu, L"\u8BED\u8A00 / Language / Idioma");
 
     // Unified Settings window
-    AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, tr(L"\u2699\uFE0F \u8BBE\u7F6E\u2026", L"\u2699\uFE0F Settings..."));
+    AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, tr(L"\u2699\uFE0F \u8BBE\u7F6E\u2026", L"\u2699\uFE0F Settings...", L"⚙️ Configurações…"));
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     if (!app.availableUpdateVersion.empty()) {
         std::wstring upTxt = app.isUpdating
-            ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ")) + app.availableUpdateVersion + L"...")
-            : (std::wstring(tr(L"\U0001F195 \u53D1\u73B0\u65B0\u7248\u672C ", L"\U0001F195 Update Available ")) + app.availableUpdateVersion);
+            ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ", L"⏳ Baixando atualização ")) + app.availableUpdateVersion + L"...")
+            : (std::wstring(tr(L"\U0001F195 \u53D1\u73B0\u65B0\u7248\u672C ", L"\U0001F195 Update Available ", L"🆕 Nova versão ")) + app.availableUpdateVersion);
         AppendMenuW(menu, MF_STRING | (app.isUpdating ? MF_GRAYED : 0), CMD_OPEN_UPDATE, upTxt.c_str());
     } else {
-        std::wstring chkTxt = std::wstring(tr(L"\u68C0\u67E5\u66F4\u65B0 (\u5F53\u524D v", L"Check for Updates (v")) + APP_VERSION + L")";
+        std::wstring chkTxt = std::wstring(tr(L"\u68C0\u67E5\u66F4\u65B0 (\u5F53\u524D v", L"Check for Updates (v", L"Verificar atualizações (v")) + APP_VERSION + L")";
         AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, chkTxt.c_str());
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, CMD_QUIT, tr(L"\u9000\u51FA KuroCat", L"Quit KuroCat"));
+    AppendMenuW(menu, MF_STRING, CMD_QUIT, tr(L"\u9000\u51FA KuroCat", L"Quit KuroCat", L"Sair do KuroCat"));
 
     HWND menuOwner = app.menuOwnerHwnd ? app.menuOwnerHwnd : app.hwnd;
     app.inContextMenu = true;
@@ -2401,8 +2509,12 @@ void showContextMenu(AppState& app, POINT screenPt) {
             app.settings.saveToRegistry();
             if (app.settings.fullClickThrough) {
                 showTrayBalloon(app,
-                    L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
-                    L"\u53D6\u6D88\u65B9\u5F0F\uFF1A\u6309 Ctrl+Alt+Shift+P\uFF0C\u6216\u6309\u4F4F Alt \u952E\u53F3\u952E\u5C0F\u732B\uFF0C\u6216\u70B9\u53F3\u4E0B\u89D2\u6258\u76D8\u5C0F\u732B\u56FE\u6807\uFF0C\u6216\u518D\u6B21\u53CC\u51FB KuroCat.exe");
+                    app.settings.tr(L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
+                                    L"KuroCat full click-through is on",
+                                    L"KuroCat: ignorar cliques ativado"),
+                    app.settings.tr(L"\u53D6\u6D88\u65B9\u5F0F\uFF1A\u6309 Ctrl+Alt+Shift+P\uFF0C\u6216\u6309\u4F4F Alt \u952E\u53F3\u952E\u5C0F\u732B\uFF0C\u6216\u70B9\u53F3\u4E0B\u89D2\u6258\u76D8\u5C0F\u732B\u56FE\u6807\uFF0C\u6216\u518D\u6B21\u53CC\u51FB KuroCat.exe",
+                                    L"To turn it off: press Ctrl+Alt+Shift+P, hold Alt and right-click the cat, click the cat icon in the tray, or run KuroCat.exe again.",
+                                    L"Para desativar: pressione Ctrl+Alt+Shift+P, segure Alt e clique com o botão direito no gato, clique no ícone do gato na bandeja ou abra o KuroCat.exe de novo."));
             }
             break;
         case CMD_TOGGLE_TOPMOST:
@@ -2483,12 +2595,13 @@ void showContextMenu(AppState& app, POINT screenPt) {
             app.settings.isEditMode = !app.settings.isEditMode;
             break;
         case CMD_LANG_ZH:
-            app.settings.isEnglish = false;
-            app.settings.saveToRegistry();
+            applyUiLanguage(app, 0);
             break;
         case CMD_LANG_EN:
-            app.settings.isEnglish = true;
-            app.settings.saveToRegistry();
+            applyUiLanguage(app, 1);
+            break;
+        case CMD_LANG_PT:
+            applyUiLanguage(app, 2);
             break;
         case CMD_TABLET_AUTO:
             app.settings.tabletMode = 0;
@@ -2599,7 +2712,9 @@ void showContextMenu(AppState& app, POINT screenPt) {
             applyWindowScaleAndPosition(app, false);
             break;
         case CMD_CHECK_UPDATE:
-            if (app.menuOwnerHwnd) startAsyncUpdateCheck(app.menuOwnerHwnd, true, 0);
+            // PT-BR fork: the in-app updater installs unverified binaries from a third-party mirror,
+            // so "Check for Updates" just opens this fork's Releases page.
+            ShellExecuteW(nullptr, L"open", FORK_RELEASES_URL, nullptr, nullptr, SW_SHOWNORMAL);
             break;
         case CMD_OPEN_UPDATE: {
             startInAppUpdate(app);
@@ -3144,12 +3259,20 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app->settings.saveToRegistry();
                 if (app->settings.fullClickThrough) {
                     showTrayBalloon(*app,
-                        L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
-                        L"\u518D\u6B21\u6309 Ctrl+Alt+Shift+P \u6216\u6309\u4F4F Alt \u53F3\u952E\u5C0F\u732B\u5373\u53EF\u53D6\u6D88");
+                        app->settings.tr(L"KuroCat \u5DF2\u5F00\u542F\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
+                                         L"KuroCat full click-through is on",
+                                         L"KuroCat: ignorar cliques ativado"),
+                        app->settings.tr(L"\u518D\u6B21\u6309 Ctrl+Alt+Shift+P \u6216\u6309\u4F4F Alt \u53F3\u952E\u5C0F\u732B\u5373\u53EF\u53D6\u6D88",
+                                         L"Press Ctrl+Alt+Shift+P again, or hold Alt and right-click the cat, to turn it off.",
+                                         L"Pressione Ctrl+Alt+Shift+P de novo ou segure Alt e clique com o botão direito no gato para desativar."));
                 } else {
                     showTrayBalloon(*app,
-                        L"KuroCat \u5DF2\u53D6\u6D88\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
-                        L"\u73B0\u5728\u53EF\u4EE5\u6B63\u5E38\u62D6\u52A8\u3001\u6478\u5934\u548C\u53F3\u952E\u6253\u5F00\u83DC\u5355\u4E86");
+                        app->settings.tr(L"KuroCat \u5DF2\u53D6\u6D88\u5B8C\u5168\u9F20\u6807\u7A7F\u900F",
+                                         L"KuroCat full click-through is off",
+                                         L"KuroCat: ignorar cliques desativado"),
+                        app->settings.tr(L"\u73B0\u5728\u53EF\u4EE5\u6B63\u5E38\u62D6\u52A8\u3001\u6478\u5934\u548C\u53F3\u952E\u6253\u5F00\u83DC\u5355\u4E86",
+                                         L"You can drag, pet and right-click the cat normally again.",
+                                         L"Você já pode arrastar, fazer carinho e clicar com o botão direito no gato de novo."));
                 }
             }
             return 0;
@@ -3179,22 +3302,32 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     app->availableUpdateUrl = res->releaseUrl;
                     // Show WHICH exe is running: the usual cause of "I already updated but it still
                     // says there's a new version" is an old copy (Desktop / autostart) still running.
-                    std::wstring msg = L"\u53D1\u73B0 KuroCat \u65B0\u7248\u672C " + res->latestTag
-                        + L"\n\u5F53\u524D\u7248\u672C\uFF1Av" + APP_VERSION
-                        + L"\n\u5F53\u524D\u8FD0\u884C\u7684\u7A0B\u5E8F\uFF1A" + currentExePath()
-                        + L"\n\n\u5982\u679C\u4F60\u5DF2\u7ECF\u4E0B\u8F7D\u8FC7\u65B0\u7248\uFF0C\u76F4\u63A5\u53CC\u51FB\u65B0\u7248 exe \u5373\u53EF\u81EA\u52A8\u66FF\u6362\u6389\u8FD9\u4E2A\u65E7\u7248\u3002"
-                        + L"\n\n\u662F\u5426\u7ACB\u5373\u5728\u8F6F\u4EF6\u5185\u81EA\u52A8\u4E0B\u8F7D\u5E76\u66F4\u65B0\u91CD\u542F\uFF1F";
-                    if (MessageBoxW(nullptr, msg.c_str(), L"KuroCat \u66F4\u65B0\u63D0\u9192",
+                    std::wstring msg = trW(L"\u53D1\u73B0 KuroCat \u65B0\u7248\u672C ", L"KuroCat ", L"Nova versão do KuroCat: ") + res->latestTag
+                        + trW(L"\n\u5F53\u524D\u7248\u672C\uFF1Av", L" is available\nCurrent version: v", L"\nVersão atual: v") + APP_VERSION
+                        + trW(L"\n\u5F53\u524D\u8FD0\u884C\u7684\u7A0B\u5E8F\uFF1A", L"\nRunning program: ", L"\nPrograma em execução: ") + currentExePath()
+                        + trW(L"\n\n\u5982\u679C\u4F60\u5DF2\u7ECF\u4E0B\u8F7D\u8FC7\u65B0\u7248\uFF0C\u76F4\u63A5\u53CC\u51FB\u65B0\u7248 exe \u5373\u53EF\u81EA\u52A8\u66FF\u6362\u6389\u8FD9\u4E2A\u65E7\u7248\u3002",
+                              L"\n\nIf you have already downloaded the new version, just double-click the new exe and it will replace this old one.",
+                              L"\n\nSe você já baixou a nova versão, basta dar dois cliques no novo .exe para substituir esta versão antiga.")
+                        + trW(L"\n\n\u662F\u5426\u7ACB\u5373\u5728\u8F6F\u4EF6\u5185\u81EA\u52A8\u4E0B\u8F7D\u5E76\u66F4\u65B0\u91CD\u542F\uFF1F",
+                              L"\n\nDownload and install the update now, then restart?",
+                              L"\n\nBaixar e instalar a atualização agora e reiniciar?");
+                    if (MessageBoxW(nullptr, msg.c_str(), trW(L"KuroCat \u66F4\u65B0\u63D0\u9192", L"KuroCat Update", L"Atualização do KuroCat"),
                                     MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
                         startInAppUpdate(*app);
                     }
                 } else if (res->manual) {
                     if (res->ok) {
-                        std::wstring msg = std::wstring(L"\u5F53\u524D\u7248\u672C v") + APP_VERSION + L" \u5DF2\u662F\u6700\u65B0\u7248\u672C\u3002";
-                        MessageBoxW(nullptr, msg.c_str(), L"KuroCat \u68C0\u67E5\u66F4\u65B0", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+                        std::wstring msg = std::wstring(trW(L"\u5F53\u524D\u7248\u672C v", L"KuroCat v", L"A versão v")) + APP_VERSION
+                            + trW(L" \u5DF2\u662F\u6700\u65B0\u7248\u672C\u3002", L" is the latest version.", L" já é a mais recente.");
+                        MessageBoxW(nullptr, msg.c_str(), trW(L"KuroCat \u68C0\u67E5\u66F4\u65B0", L"KuroCat – Check for Updates", L"KuroCat – Verificar atualizações"),
+                                    MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
                     } else {
-                        MessageBoxW(nullptr, L"\u65E0\u6CD5\u8FDE\u63A5\u5230\u66F4\u65B0\u670D\u52A1\u5668\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u6216\u68C0\u67E5\u7F51\u7EDC\u3002",
-                                    L"KuroCat \u68C0\u67E5\u66F4\u65B0", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+                        MessageBoxW(nullptr,
+                                    trW(L"\u65E0\u6CD5\u8FDE\u63A5\u5230\u66F4\u65B0\u670D\u52A1\u5668\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u6216\u68C0\u67E5\u7F51\u7EDC\u3002",
+                                        L"Couldn't reach the update server. Please try again later or check your network.",
+                                        L"Não foi possível conectar ao servidor de atualizações. Tente de novo mais tarde ou verifique sua conexão."),
+                                    trW(L"KuroCat \u68C0\u67E5\u66F4\u65B0", L"KuroCat – Check for Updates", L"KuroCat – Verificar atualizações"),
+                                    MB_OK | MB_ICONWARNING | MB_TOPMOST);
                     }
                 }
                 delete res;
@@ -3216,8 +3349,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     PostQuitMessage(0);
                 } else {
                     if (MessageBoxW(nullptr,
-                                    L"\u81EA\u52A8\u4E0B\u8F7D\u6216\u66FF\u6362\u5B89\u88C5\u5305\u5931\u8D25\uFF0C\u662F\u5426\u6253\u5F00\u4E0B\u8F7D\u9875\u624B\u52A8\u4E0B\u8F7D\uFF1F",
-                                    L"KuroCat \u81EA\u52A8\u66F4\u65B0", MB_YESNO | MB_ICONWARNING | MB_TOPMOST) == IDYES) {
+                                    trW(L"\u81EA\u52A8\u4E0B\u8F7D\u6216\u66FF\u6362\u5B89\u88C5\u5305\u5931\u8D25\uFF0C\u662F\u5426\u6253\u5F00\u4E0B\u8F7D\u9875\u624B\u52A8\u4E0B\u8F7D\uFF1F",
+                                        L"The automatic download or replacement failed. Open the download page to update manually?",
+                                        L"Falha ao baixar ou substituir o programa automaticamente. Abrir a página de download para atualizar manualmente?"),
+                                    trW(L"KuroCat \u81EA\u52A8\u66F4\u65B0", L"KuroCat Auto-Update", L"KuroCat – Atualização automática"), MB_YESNO | MB_ICONWARNING | MB_TOPMOST) == IDYES) {
                         const wchar_t* url = (app && !app->availableUpdateUrl.empty())
                             ? app->availableUpdateUrl.c_str()
                             : UPDATE_PAGE_URL;
@@ -3448,6 +3583,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     AppState app;
     g_app = &app;
     app.settings.loadFromRegistry();
+    kurocat::setUiLanguage(static_cast<kurocat::UiLanguage>(std::clamp(app.settings.language, 0, 2)));
     SkinLibrary::customDir() = utf8ToWide(app.settings.customSkinsDir);
     KeyboardLayout::levelKeyboard() = app.settings.levelKeyboard;
     CatSettings::loadStatsFromRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
@@ -3578,7 +3714,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // Global shortcut Ctrl+Alt+Shift+P to toggle full click-through anytime!
     if (app.menuOwnerHwnd) {
         RegisterHotKey(app.menuOwnerHwnd, HOTKEY_CLICKTHROUGH_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'P');
-        startAsyncUpdateCheck(app.menuOwnerHwnd, false, 2500);
+        // PT-BR fork: no automatic update check at launch.
     }
 
     ShowWindow(app.hwnd, SW_SHOWNOACTIVATE);

@@ -16,7 +16,9 @@ enum InputEngineStatus: String {
     }
 
     var permissionPillText: String {
-        self == .needsRestart ? "监听启动失败，点击重启重试 ↻" : "点击开启全局/游戏键盘监听 🔑"
+        self == .needsRestart
+            ? loc("监听启动失败，点击重启重试 ↻", "Input capture failed — click to restart ↻", "Falha na captura — clique para reiniciar ↻")
+            : loc("点击开启全局/游戏键盘监听 🔑", "Click to enable global/game key capture 🔑", "Clique para ativar a captura global de teclas 🔑")
     }
 }
 

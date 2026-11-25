@@ -4,6 +4,15 @@ import AppKit
 
 // MARK: - Themes & Settings
 
+/// Picks the UI string for the current language.
+func loc(_ zh: String, _ en: String, _ pt: String) -> String {
+    switch CatSettings.shared.language {
+    case "en": return en
+    case "pt": return pt
+    default: return zh
+    }
+}
+
 enum KeyboardTheme: String, CaseIterable {
     case classicMilk = "经典奶白暖黄 (原版)"
     case midnightHacker = "暗夜极客黑"
@@ -15,6 +24,40 @@ enum CatCoatTheme: String, CaseIterable {
     case siamese = "挖煤暹罗猫"
     case shorthair = "美短（银虎斑加白）"
     case orangeWhite = "橘白猫"
+}
+
+extension KeyboardTheme {
+    var displayName: String {
+        switch self {
+        case .classicMilk: return loc(rawValue, "Classic Milk White", "Branco leite clássico")
+        case .midnightHacker: return loc(rawValue, "Midnight Hacker Black", "Preto hacker da meia-noite")
+        case .retroCream: return loc(rawValue, "Retro Cream Gray", "Cinza creme retrô")
+        }
+    }
+}
+
+extension CatCoatTheme {
+    var displayName: String {
+        switch self {
+        case .classicBlack: return loc(rawValue, "Classic Black Cat", "Gatinho preto clássico")
+        case .siamese: return loc(rawValue, "Siamese Cat", "Gato siamês")
+        case .shorthair: return loc(rawValue, "Silver Tabby Shorthair", "Pelo curto tigrado prateado")
+        case .orangeWhite: return loc(rawValue, "Orange & White Cat", "Gato laranja e branco")
+        }
+    }
+}
+
+extension EyeColorTheme {
+    var displayName: String {
+        switch self {
+        case .neonChartreuse: return loc(rawValue, "Neon Chartreuse", "Verde-limão neon")
+        case .siameseBlue: return loc(rawValue, "Siamese Ice Blue", "Azul siamês")
+        case .warmAmber: return loc(rawValue, "Warm Amber", "Âmbar quente")
+        case .iceCyan: return loc(rawValue, "Ice Cyan", "Ciano gelo")
+        case .softAmber: return loc(rawValue, "Soft Amber", "Âmbar suave")
+        case .referenceHazel: return loc(rawValue, "Golden Hazel", "Avelã dourado")
+        }
+    }
 }
 
 enum EyeColorTheme: String, CaseIterable {
@@ -114,7 +157,7 @@ final class CatSettings {
     var enableDragAnimation: Bool {
         didSet { UserDefaults.standard.set(enableDragAnimation, forKey: "KuroCat.EnableDragAnimation") }
     }
-    /// "zh" or "en"
+    /// "zh", "en" or "pt" (Brazilian Portuguese)
     var language: String {
         didSet { UserDefaults.standard.set(language, forKey: "KuroCat.Language") }
     }
@@ -215,7 +258,9 @@ final class CatSettings {
         whiteOutline = d.object(forKey: "KuroCat.WhiteOutline") as? Bool ?? true
         enableAnger = d.object(forKey: "KuroCat.EnableAnger") as? Bool ?? true
         enableDragAnimation = d.object(forKey: "KuroCat.EnableDragAnimation") as? Bool ?? true
-        language = d.string(forKey: "KuroCat.Language") ?? "zh"
+        // KUROCAT_LANGUAGE (zh/en/pt) overrides the saved language for this process only; used by tests.
+        let envLanguage = ProcessInfo.processInfo.environment["KUROCAT_LANGUAGE"].flatMap { ["zh", "en", "pt"].contains($0) ? $0 : nil }
+        language = envLanguage ?? d.string(forKey: "KuroCat.Language") ?? "pt"
         petInteraction = d.object(forKey: "KuroCat.PetInteraction") as? Bool ?? true
         fullClickThrough = d.object(forKey: "KuroCat.FullClickThrough") as? Bool ?? false
         fullScreenOverlay = d.object(forKey: "KuroCat.FullScreenOverlay") as? Bool ?? true
@@ -633,8 +678,7 @@ final class CatPhysics {
             pupilScale.target = 1.12
             earTwitch.velocity -= 2.2
             if CatSettings.shared.showMouseBadges {
-                let en = CatSettings.shared.isEnglish
-                let label = button == 0 ? (en ? "LMB" : "左键") : (button == 1 ? (en ? "RMB" : "右键") : (en ? "MMB" : "中键"))
+                let label = button == 0 ? loc("左键", "LMB", "Esq") : (button == 1 ? loc("右键", "RMB", "Dir") : loc("中键", "MMB", "Meio"))
                 let pt = CGPoint(
                     x: CatPhysics.mouseBaseCenter.x + mouseOffset.point.x,
                     y: CatPhysics.mouseBaseCenter.y + mouseOffset.point.y - 6
@@ -1612,6 +1656,13 @@ struct SkinSpec {
 
     static func builtIn(_ coat: CatCoatTheme) -> SkinSpec { builtIns[coat] ?? builtIns[.classicBlack]! }
 
+    /// Name to show in the UI: built-in skins keep their Chinese `name` as data and are
+    /// shown in the current UI language; imported skins show the name from their file.
+    var displayName: String {
+        guard builtIn, let coat = CatCoatTheme.allCases.first(where: { SkinSpec.builtIn($0).id == id }) else { return name }
+        return CatSettings.shared.language == "zh" ? name : coat.displayName
+    }
+
     private static let builtIns: [CatCoatTheme: SkinSpec] = {
         let black = SkinColor.rgba(0.085, 0.085, 0.095)
         let milk = SkinColor.hex(0xF2EEE4)
@@ -1691,34 +1742,34 @@ struct SkinSpec {
 
     static func load(contentsOf url: URL) throws -> SkinSpec {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        if let size = attrs?[.size] as? NSNumber, size.intValue > maxFileBytes { throw SkinError(message: "皮肤文件超过 2 MB 上限") }
-        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: "无法打开这个文件") }
+        if let size = attrs?[.size] as? NSNumber, size.intValue > maxFileBytes { throw SkinError(message: loc("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB")) }
+        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: loc("无法打开这个文件", "Couldn't open this file", "Não foi possível abrir este arquivo")) }
         return try parse(data)
     }
 
     static func parse(_ data: Data) throws -> SkinSpec {
         func fail(_ message: String) -> SkinError { SkinError(message: message) }
-        if data.count > maxFileBytes { throw fail("皮肤文件超过 2 MB 上限") }
-        if data.isEmpty { throw fail("皮肤文件是空的") }
+        if data.count > maxFileBytes { throw fail(loc("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB")) }
+        if data.isEmpty { throw fail(loc("皮肤文件是空的", "The skin file is empty", "O arquivo de skin está vazio")) }
         let rootAny: Any
         do { rootAny = try JSONSerialization.jsonObject(with: data, options: []) }
-        catch { throw fail("不是有效的 JSON（请检查逗号、引号和括号）") }
-        guard let root = rootAny as? [String: Any] else { throw fail("皮肤文件最外层必须是 JSON 对象 { … }") }
+        catch { throw fail(loc("不是有效的 JSON（请检查逗号、引号和括号）", "Not valid JSON (check commas, quotes and brackets)", "Não é um JSON válido (confira vírgulas, aspas e chaves)")) }
+        guard let root = rootAny as? [String: Any] else { throw fail(loc("皮肤文件最外层必须是 JSON 对象 { … }", "The top level of a skin file must be a JSON object { … }", "O nível mais externo do arquivo de skin precisa ser um objeto JSON { … }")) }
 
         func isBool(_ v: Any) -> Bool { (v as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }
         func numberValue(_ v: Any) -> Double? { isBool(v) ? nil : (v as? NSNumber)?.doubleValue }
         func isNull(_ v: Any?) -> Bool { v == nil || v is NSNull }
         func number(_ v: Any?, _ field: String, _ lo: Double, _ hi: Double, _ def: CGFloat) throws -> CGFloat {
             if isNull(v) { return def }
-            guard let n = numberValue(v!), n.isFinite else { throw fail("\(field) 必须是数字") }
+            guard let n = numberValue(v!), n.isFinite else { throw fail(loc("\(field) 必须是数字", "\(field) must be a number", "\(field) precisa ser um número")) }
             return CGFloat(min(hi, max(lo, n)))
         }
         func color(_ v: Any?, _ field: String) throws -> SkinColor? {
             if isNull(v) { return nil }
-            guard let s = v as? String else { throw fail("\(field) 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串") }
+            guard let s = v as? String else { throw fail(loc("\(field) 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串", "\(field) must be a \"#RRGGBB\" or \"#RRGGBBAA\" color string", "\(field) precisa ser uma cor no formato \"#RRGGBB\" ou \"#RRGGBBAA\"")) }
             let chars = Array(s.utf8)
             guard (chars.count == 7 || chars.count == 9), chars[0] == UInt8(ascii: "#") else {
-                throw fail("\(field) 颜色格式应为 #RRGGBB 或 #RRGGBBAA，现在是 \"\(String(s.prefix(16)))\"")
+                throw fail(loc("\(field) 颜色格式应为 #RRGGBB 或 #RRGGBBAA，现在是 \"\(String(s.prefix(16)))\"", "\(field) color must be #RRGGBB or #RRGGBBAA, got \"\(String(s.prefix(16)))\"", "\(field): a cor deve estar no formato #RRGGBB ou #RRGGBBAA, mas veio \"\(String(s.prefix(16)))\""))
             }
             var vals: [Int] = [0, 0, 0, 255]
             for i in 1..<chars.count {
@@ -1728,7 +1779,7 @@ struct SkinSpec {
                 case UInt8(ascii: "0")...UInt8(ascii: "9"): d = Int(c) - 48
                 case UInt8(ascii: "a")...UInt8(ascii: "f"): d = Int(c) - 87
                 case UInt8(ascii: "A")...UInt8(ascii: "F"): d = Int(c) - 55
-                default: throw fail("\(field) 颜色里有非十六进制字符：\"\(s)\"")
+                default: throw fail(loc("\(field) 颜色里有非十六进制字符：\"\(s)\"", "\(field) color has non-hex characters: \"\(s)\"", "\(field): a cor tem caracteres que não são hexadecimais: \"\(s)\""))
                 }
                 let k = (i - 1) / 2
                 if (i - 1) % 2 == 0 { vals[k] = 0 }
@@ -1739,7 +1790,7 @@ struct SkinSpec {
         /// Returns nil for unrecognized future space names so newer Workshop skins remain forward-compatible.
         func space(_ v: Any?, _ field: String) throws -> SkinSpace? {
             guard let s = v as? String, !s.isEmpty else {
-                throw fail("\(field) 缺失：必须是 head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg 之一")
+                throw fail(loc("\(field) 缺失：必须是 head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg 之一", "\(field) missing: must be one of head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg", "\(field) ausente: precisa ser head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg"))
             }
             return SkinSpace(rawValue: s)
         }
@@ -1748,22 +1799,22 @@ struct SkinSpec {
             return String(String.UnicodeScalarView(t.prefix(maxChars)))
         }
 
-        guard let ver = root["formatVersion"] else { throw fail("缺少 formatVersion，这不是 KuroCat 皮肤文件") }
-        guard let vn = numberValue(ver), vn == vn.rounded() else { throw fail("formatVersion 必须是整数") }
-        if vn > Double(formatVersion) { throw fail("这个皮肤使用了更新的格式（formatVersion \(Int(vn))），请先升级 KuroCat") }
-        if vn < 1 { throw fail("formatVersion 无效") }
+        guard let ver = root["formatVersion"] else { throw fail(loc("缺少 formatVersion，这不是 KuroCat 皮肤文件", "Missing formatVersion — this is not a KuroCat skin file", "Falta formatVersion — este não é um arquivo de skin do KuroCat")) }
+        guard let vn = numberValue(ver), vn == vn.rounded() else { throw fail(loc("formatVersion 必须是整数", "formatVersion must be an integer", "formatVersion precisa ser um número inteiro")) }
+        if vn > Double(formatVersion) { throw fail(loc("这个皮肤使用了更新的格式（formatVersion \(Int(vn))），请先升级 KuroCat", "This skin uses a newer format (formatVersion \(Int(vn))); please update KuroCat first", "Esta skin usa um formato mais novo (formatVersion \(Int(vn))); atualize o KuroCat primeiro")) }
+        if vn < 1 { throw fail(loc("formatVersion 无效", "Invalid formatVersion", "formatVersion inválido")) }
 
         var spec = SkinSpec()
-        guard let name = root["name"] as? String else { throw fail("缺少皮肤名称 name") }
+        guard let name = root["name"] as? String else { throw fail(loc("缺少皮肤名称 name", "Missing skin name (name)", "Falta o nome da skin (name)")) }
         spec.name = trimmed(name, 40)
-        if spec.name.isEmpty { throw fail("皮肤名称 name 不能为空") }
+        if spec.name.isEmpty { throw fail(loc("皮肤名称 name 不能为空", "Skin name (name) cannot be empty", "O nome da skin (name) não pode ficar vazio")) }
         if let author = root["author"], !isNull(author) {
-            guard let a = author as? String else { throw fail("author 必须是字符串") }
+            guard let a = author as? String else { throw fail(loc("author 必须是字符串", "author must be a string", "author precisa ser um texto")) }
             spec.author = trimmed(a, 40)
         }
 
         // Palette
-        guard let pal = root["palette"] as? [String: Any] else { throw fail("缺少调色板 palette") }
+        guard let pal = root["palette"] as? [String: Any] else { throw fail(loc("缺少调色板 palette", "Missing palette", "Falta a paleta (palette)")) }
         func pc(_ key: String) throws -> SkinColor? { try color(pal[key], "palette.\(key)") }
         let body = try pc("body"), headBody = try pc("headBody"), bodyShade = try pc("bodyShade"), belly = try pc("belly"), legs = try pc("legs")
         let paws = try pc("paws"), pawPads = try pc("pawPads"), earOuter = try pc("earOuter"), earInner = try pc("earInner")
@@ -1774,7 +1825,7 @@ struct SkinSpec {
         let tail = try pc("tail")
         let tailTip = try pc("tailTip"), stripes = try pc("stripes"), whiskers = try pc("whiskers"), crease = try pc("crease")
         let outline = try pc("outline"), points = try pc("points"), pointsMid = try pc("pointsMid")
-        guard let bodyColor = body else { throw fail("调色板缺少主体颜色 palette.body") }
+        guard let bodyColor = body else { throw fail(loc("调色板缺少主体颜色 palette.body", "Palette is missing the body color palette.body", "A paleta não tem a cor do corpo (palette.body)")) }
         var p = SkinPalette()
         p.body = bodyColor; p.headBody = headBody; p.bodyShade = bodyShade; p.belly = belly
         p.legs = legs ?? bodyColor
@@ -1796,9 +1847,9 @@ struct SkinSpec {
 
         // Shape
         if let shAny = root["shape"], !isNull(shAny) {
-            guard let sh = shAny as? [String: Any] else { throw fail("shape 必须是对象") }
+            guard let sh = shAny as? [String: Any] else { throw fail(loc("shape 必须是对象", "shape must be an object", "shape precisa ser um objeto")) }
             if let b = sh["build"], !isNull(b) {
-                guard let bs = b as? String, let build = SkinBuild(rawValue: bs) else { throw fail("shape.build 必须是 \"standard\" 或 \"sleek\"") }
+                guard let bs = b as? String, let build = SkinBuild(rawValue: bs) else { throw fail(loc("shape.build 必须是 \"standard\" 或 \"sleek\"", "shape.build must be \"standard\" or \"sleek\"", "shape.build precisa ser \"standard\" ou \"sleek\"")) }
                 spec.shape.build = build
             }
             spec.shape.bodyWidth = try number(sh["bodyWidth"], "shape.bodyWidth", 0.85, 1.35, 1)
@@ -1835,12 +1886,12 @@ struct SkinSpec {
             }
         }
         if let hs = root["headSurface"], !isNull(hs) {
-            guard let hss = hs as? String, let surface = SkinHeadSurface(rawValue: hss) else { throw fail("headSurface 必须是 \"dome\" 或 \"plane\"") }
+            guard let hss = hs as? String, let surface = SkinHeadSurface(rawValue: hss) else { throw fail(loc("headSurface 必须是 \"dome\" 或 \"plane\"", "headSurface must be \"dome\" or \"plane\"", "headSurface precisa ser \"dome\" ou \"plane\"")) }
             spec.headSurface = surface
         }
 
         if let il = root["idleLegs"], !isNull(il) {
-            guard let ils = il as? String, ils == "legs" || ils == "chest" else { throw fail("idleLegs 必须是 \"legs\" 或 \"chest\"") }
+            guard let ils = il as? String, ils == "legs" || ils == "chest" else { throw fail(loc("idleLegs 必须是 \"legs\" 或 \"chest\"", "idleLegs must be \"legs\" or \"chest\"", "idleLegs precisa ser \"legs\" ou \"chest\"")) }
             spec.idleLegsTinted = ils == "legs"
         }
         if let rs = root["renderStyle"] as? String, let style = SkinRenderStyle(rawValue: rs) {
@@ -1852,22 +1903,22 @@ struct SkinSpec {
 
         // Regions (pen-tool curve areas)
         if let regsAny = root["regions"], !isNull(regsAny) {
-            guard let regs = regsAny as? [Any] else { throw fail("regions 必须是数组") }
-            if regs.count > 64 { throw fail("regions 最多 64 个分区") }
+            guard let regs = regsAny as? [Any] else { throw fail(loc("regions 必须是数组", "regions must be an array", "regions precisa ser uma lista")) }
+            if regs.count > 64 { throw fail(loc("regions 最多 64 个分区", "regions allows at most 64 entries", "regions aceita no máximo 64 áreas")) }
             for (i, rAny) in regs.enumerated() {
                 let f = "regions[\(i)]"
-                guard let r = rAny as? [String: Any] else { throw fail("\(f) 必须是对象") }
+                guard let r = rAny as? [String: Any] else { throw fail(loc("\(f) 必须是对象", "\(f) must be an object", "\(f) precisa ser um objeto")) }
                 guard let sp = try space(r["space"], "\(f).space") else { continue }
-                guard let parsedFill = try color(r["fill"], "\(f).fill") else { throw fail("\(f).fill 缺失") }
+                guard let parsedFill = try color(r["fill"], "\(f).fill") else { throw fail(loc("\(f).fill 缺失", "\(f).fill is missing", "Falta \(f).fill")) }
                 var fill = parsedFill
                 fill.a *= try number(r["alpha"], "\(f).alpha", 0, 1, 1)
-                guard let anchorsAny = r["anchors"] as? [Any] else { throw fail("\(f).anchors 必须是锚点数组") }
-                if anchorsAny.count < 2 || anchorsAny.count > 128 { throw fail("\(f).anchors 需要 2–128 个锚点") }
+                guard let anchorsAny = r["anchors"] as? [Any] else { throw fail(loc("\(f).anchors 必须是锚点数组", "\(f).anchors must be an array of anchors", "\(f).anchors precisa ser uma lista de âncoras")) }
+                if anchorsAny.count < 2 || anchorsAny.count > 128 { throw fail(loc("\(f).anchors 需要 2–128 个锚点", "\(f).anchors needs 2–128 anchors", "\(f).anchors precisa de 2 a 128 âncoras")) }
                 var anchors: [SkinBezierAnchor] = []
                 for (k, aAny) in anchorsAny.enumerated() {
                     let af = "\(f).anchors[\(k)]"
-                    guard let a = aAny as? [String: Any] else { throw fail("\(af) 必须是 {x, y, inX, inY, outX, outY} 对象") }
-                    if isNull(a["x"]) || isNull(a["y"]) { throw fail("\(af) 缺少 x / y") }
+                    guard let a = aAny as? [String: Any] else { throw fail(loc("\(af) 必须是 {x, y, inX, inY, outX, outY} 对象", "\(af) must be an {x, y, inX, inY, outX, outY} object", "\(af) precisa ser um objeto {x, y, inX, inY, outX, outY}")) }
+                    if isNull(a["x"]) || isNull(a["y"]) { throw fail(loc("\(af) 缺少 x / y", "\(af) is missing x / y", "Falta x / y em \(af)")) }
                     let x = try number(a["x"], "\(af).x", -400, 400, 0)
                     let y = try number(a["y"], "\(af).y", -400, 400, 0)
                     let inX = try number(a["inX"], "\(af).inX", -400, 400, x)
@@ -1891,26 +1942,26 @@ struct SkinSpec {
 
         // Marks (polygons / strokes, same model as the built-in CoatMark artwork)
         if let marksAny = root["marks"], !isNull(marksAny) {
-            guard let marks = marksAny as? [Any] else { throw fail("marks 必须是数组") }
-            if marks.count > 256 { throw fail("marks 最多 256 条") }
+            guard let marks = marksAny as? [Any] else { throw fail(loc("marks 必须是数组", "marks must be an array", "marks precisa ser uma lista")) }
+            if marks.count > 256 { throw fail(loc("marks 最多 256 条", "marks allows at most 256 entries", "marks aceita no máximo 256 itens")) }
             for (i, mAny) in marks.enumerated() {
                 let f = "marks[\(i)]"
-                guard let m = mAny as? [String: Any] else { throw fail("\(f) 必须是对象") }
+                guard let m = mAny as? [String: Any] else { throw fail(loc("\(f) 必须是对象", "\(f) must be an object", "\(f) precisa ser um objeto")) }
                 guard let sp = try space(m["space"], "\(f).space") else { continue }
-                guard let kind = m["kind"] as? String, kind == "polygon" || kind == "stroke" else { throw fail("\(f).kind 必须是 \"polygon\" 或 \"stroke\"") }
+                guard let kind = m["kind"] as? String, kind == "polygon" || kind == "stroke" else { throw fail(loc("\(f).kind 必须是 \"polygon\" 或 \"stroke\"", "\(f).kind must be \"polygon\" or \"stroke\"", "\(f).kind precisa ser \"polygon\" ou \"stroke\"")) }
                 let stroke = kind == "stroke"
                 let parsedColor = try color(m["color"], "\(f).color")
-                guard var c = parsedColor ?? p.stripes else { throw fail("\(f).color 缺失，且调色板没有 stripes 可作默认色") }
+                guard var c = parsedColor ?? p.stripes else { throw fail(loc("\(f).color 缺失，且调色板没有 stripes 可作默认色", "\(f).color is missing and the palette has no stripes color to fall back on", "Falta \(f).color e a paleta não tem stripes para usar como cor padrão")) }
                 c.a *= try number(m["alpha"], "\(f).alpha", 0, 1, 1)
                 var width: CGFloat = 0
                 if stroke { width = try number(m["width"], "\(f).width", 0.2, 24, 2) }
-                guard let ptsAny = m["points"] as? [Any] else { throw fail("\(f).points 必须是 [[x, y], …] 数组") }
+                guard let ptsAny = m["points"] as? [Any] else { throw fail(loc("\(f).points 必须是 [[x, y], …] 数组", "\(f).points must be a [[x, y], …] array", "\(f).points precisa ser uma lista [[x, y], …]")) }
                 let minPts = stroke ? 2 : 3
-                if ptsAny.count < minPts || ptsAny.count > 512 { throw fail("\(f).points 需要 \(minPts)–512 个点") }
+                if ptsAny.count < minPts || ptsAny.count > 512 { throw fail(loc("\(f).points 需要 \(minPts)–512 个点", "\(f).points needs \(minPts)–512 points", "\(f).points precisa de \(minPts) a 512 pontos")) }
                 var pts: [CGPoint] = []
                 for (k, ptAny) in ptsAny.enumerated() {
                     guard let pair = ptAny as? [Any], pair.count == 2, let x = numberValue(pair[0]), let y = numberValue(pair[1]), x.isFinite, y.isFinite else {
-                        throw fail("\(f).points[\(k)] 必须是 [x, y]")
+                        throw fail(loc("\(f).points[\(k)] 必须是 [x, y]", "\(f).points[\(k)] must be [x, y]", "\(f).points[\(k)] precisa ser [x, y]"))
                     }
                     pts.append(CGPoint(x: min(400, max(-400, x)), y: min(400, max(-400, y))))
                 }
@@ -1921,21 +1972,21 @@ struct SkinSpec {
 
         // Decorations (anchored PNG stickers)
         if let decosAny = root["decorations"], !isNull(decosAny) {
-            guard let decos = decosAny as? [Any] else { throw fail("decorations 必须是数组") }
-            if decos.count > 8 { throw fail("decorations 最多 8 个贴纸") }
+            guard let decos = decosAny as? [Any] else { throw fail(loc("decorations 必须是数组", "decorations must be an array", "decorations precisa ser uma lista")) }
+            if decos.count > 8 { throw fail(loc("decorations 最多 8 个贴纸", "decorations allows at most 8 stickers", "decorations aceita no máximo 8 adesivos")) }
             for (i, dAny) in decos.enumerated() {
                 let f = "decorations[\(i)]"
-                guard let d = dAny as? [String: Any] else { throw fail("\(f) 必须是对象") }
-                guard let b64 = d["png"] as? String, let png = decodeBase64PNG(b64) else { throw fail("\(f).png 必须是 base64 编码的 PNG") }
-                if png.count > 1024 * 1024 { throw fail("\(f).png 超过 1 MB") }
+                guard let d = dAny as? [String: Any] else { throw fail(loc("\(f) 必须是对象", "\(f) must be an object", "\(f) precisa ser um objeto")) }
+                guard let b64 = d["png"] as? String, let png = decodeBase64PNG(b64) else { throw fail(loc("\(f).png 必须是 base64 编码的 PNG", "\(f).png must be a base64-encoded PNG", "\(f).png precisa ser um PNG em base64")) }
+                if png.count > 1024 * 1024 { throw fail(loc("\(f).png 超过 1 MB", "\(f).png exceeds 1 MB", "\(f).png passa de 1 MB")) }
                 guard let size = pngSize(png), size.0 <= 1024, size.1 <= 1024,
                       let provider = CGDataProvider(data: png as CFData),
                       let rawImage = CGImage(pngDataProviderSource: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) else {
-                    throw fail("\(f).png 不是有效的 PNG（或尺寸超过 1024×1024）")
+                    throw fail(loc("\(f).png 不是有效的 PNG（或尺寸超过 1024×1024）", "\(f).png is not a valid PNG (or is larger than 1024×1024)", "\(f).png não é um PNG válido (ou passa de 1024×1024)"))
                 }
                 let image = predecodeCGImage(rawImage)
                 guard let anchorName = d["anchor"] as? String, !anchorName.isEmpty else {
-                    throw fail("\(f).anchor 必须是 headTop / face / neck / tailTip 之一")
+                    throw fail(loc("\(f).anchor 必须是 headTop / face / neck / tailTip 之一", "\(f).anchor must be one of headTop / face / neck / tailTip", "\(f).anchor precisa ser headTop / face / neck / tailTip"))
                 }
                 guard let anchor = SkinAnchorPoint(rawValue: anchorName) else { continue }
                 let offsetX = try number(d["offsetX"], "\(f).offsetX", -120, 120, 0)
@@ -1949,7 +2000,7 @@ struct SkinSpec {
 
         if let prev = root["preview"], !isNull(prev) {
             guard let s = prev as? String, let png = decodeBase64PNG(s), pngSize(png) != nil, png.count <= 512 * 1024 else {
-                throw fail("preview 必须是不超过 512 KB 的 base64 PNG")
+                throw fail(loc("preview 必须是不超过 512 KB 的 base64 PNG", "preview must be a base64 PNG of at most 512 KB", "preview precisa ser um PNG em base64 de até 512 KB"))
             }
             spec.preview = png
         }
@@ -2035,14 +2086,14 @@ final class SkinLibrary {
     /// Validates `url`, copies it into the skins folder and returns the new skin's id.
     func importFile(_ url: URL) throws -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        if let size = attrs?[.size] as? NSNumber, size.intValue > SkinSpec.maxFileBytes { throw SkinError(message: "皮肤文件超过 2 MB 上限") }
-        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: "无法打开这个文件") }
+        if let size = attrs?[.size] as? NSNumber, size.intValue > SkinSpec.maxFileBytes { throw SkinError(message: loc("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB")) }
+        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: loc("无法打开这个文件", "Couldn't open this file", "Não foi possível abrir este arquivo")) }
         let spec = try SkinSpec.parse(data)
         do {
             try FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
             try data.write(to: Self.directory.appendingPathComponent("\(spec.id).kurocat"), options: .atomic)
         } catch {
-            throw SkinError(message: "保存皮肤失败：无法写入 \(Self.directory.path)")
+            throw SkinError(message: loc("保存皮肤失败：无法写入 \(Self.directory.path)", "Couldn't save the skin: can't write to \(Self.directory.path)", "Falha ao salvar a skin: não foi possível gravar em \(Self.directory.path)"))
         }
         reload()
         return spec.id
@@ -2069,22 +2120,22 @@ final class SkinLibrary {
     /// removing the old file, and returning the new skin id.
     func rename(id: String, newName: String) throws -> String {
         guard id.count == 16, id.allSatisfy({ "0123456789abcdef".contains($0) }) else {
-            throw SkinError(message: "无效的皮肤 ID")
+            throw SkinError(message: loc("无效的皮肤 ID", "Invalid skin ID", "ID de skin inválido"))
         }
         let cleanedScalars = newName.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.filter { $0.value >= 0x20 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars.prefix(40)))
-        if cleaned.isEmpty { throw SkinError(message: "皮肤名称不能为空") }
+        if cleaned.isEmpty { throw SkinError(message: loc("皮肤名称不能为空", "Skin name cannot be empty", "O nome da skin não pode ficar vazio")) }
 
         let oldURL = Self.directory.appendingPathComponent("\(id).kurocat")
         guard let data = try? Data(contentsOf: oldURL) else {
-            throw SkinError(message: "找不到原始皮肤文件")
+            throw SkinError(message: loc("找不到原始皮肤文件", "Couldn't find the original skin file", "Não foi possível encontrar o arquivo original da skin"))
         }
         guard var obj = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] else {
-            throw SkinError(message: "皮肤 JSON 解析失败")
+            throw SkinError(message: loc("皮肤 JSON 解析失败", "Couldn't parse the skin JSON", "Falha ao ler o JSON da skin"))
         }
         obj["name"] = cleaned
         guard let newData = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else {
-            throw SkinError(message: "写入皮肤 JSON 失败")
+            throw SkinError(message: loc("写入皮肤 JSON 失败", "Couldn't write the skin JSON", "Falha ao gravar o JSON da skin"))
         }
         let newSpec = try SkinSpec.parse(newData)
         let newURL = Self.directory.appendingPathComponent("\(newSpec.id).kurocat")
@@ -2095,7 +2146,7 @@ final class SkinLibrary {
                 try? FileManager.default.removeItem(at: oldURL)
             }
         } catch {
-            throw SkinError(message: "保存重命名后的皮肤失败")
+            throw SkinError(message: loc("保存重命名后的皮肤失败", "Couldn't save the renamed skin", "Falha ao salvar a skin renomeada"))
         }
         reload()
         return newSpec.id
@@ -2169,28 +2220,28 @@ struct KeyboardSkinSpec: Equatable {
     static func load(contentsOf url: URL) throws -> KeyboardSkinSpec {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         if let size = attrs?[.size] as? NSNumber, size.intValue > maxFileBytes {
-            throw SkinError(message: "键盘皮肤文件超过 256 KB 上限")
+            throw SkinError(message: loc("键盘皮肤文件超过 256 KB 上限", "Keyboard skin file exceeds the 256 KB limit", "O arquivo de skin de teclado passa do limite de 256 KB"))
         }
-        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: "无法打开这个键盘皮肤文件") }
+        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: loc("无法打开这个键盘皮肤文件", "Couldn't open this keyboard skin file", "Não foi possível abrir este arquivo de skin de teclado")) }
         return try parse(data)
     }
 
     static func parse(_ data: Data) throws -> KeyboardSkinSpec {
         func fail(_ message: String) -> SkinError { SkinError(message: message) }
-        if data.count > maxFileBytes { throw fail("键盘皮肤文件超过 256 KB 上限") }
-        if data.isEmpty { throw fail("键盘皮肤文件是空的") }
+        if data.count > maxFileBytes { throw fail(loc("键盘皮肤文件超过 256 KB 上限", "Keyboard skin file exceeds the 256 KB limit", "O arquivo de skin de teclado passa do limite de 256 KB")) }
+        if data.isEmpty { throw fail(loc("键盘皮肤文件是空的", "The keyboard skin file is empty", "O arquivo de skin de teclado está vazio")) }
         let rootAny: Any
         do { rootAny = try JSONSerialization.jsonObject(with: data, options: []) }
-        catch { throw fail("不是有效的 JSON（请检查逗号、引号和括号）") }
-        guard let root = rootAny as? [String: Any] else { throw fail("键盘皮肤最外层必须是 JSON 对象 { … }") }
+        catch { throw fail(loc("不是有效的 JSON（请检查逗号、引号和括号）", "Not valid JSON (check commas, quotes and brackets)", "Não é um JSON válido (confira vírgulas, aspas e chaves)")) }
+        guard let root = rootAny as? [String: Any] else { throw fail(loc("键盘皮肤最外层必须是 JSON 对象 { … }", "The top level of a keyboard skin must be a JSON object { … }", "O nível mais externo da skin de teclado precisa ser um objeto JSON { … }")) }
 
         func isNull(_ v: Any?) -> Bool { v == nil || v is NSNull }
         func color(_ v: Any?, _ field: String) throws -> SkinColor? {
             if isNull(v) { return nil }
-            guard let s = v as? String else { throw fail("\(field) 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串") }
+            guard let s = v as? String else { throw fail(loc("\(field) 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串", "\(field) must be a \"#RRGGBB\" or \"#RRGGBBAA\" color string", "\(field) precisa ser uma cor no formato \"#RRGGBB\" ou \"#RRGGBBAA\"")) }
             let chars = Array(s.utf8)
             guard (chars.count == 7 || chars.count == 9), chars[0] == UInt8(ascii: "#") else {
-                throw fail("\(field) 颜色格式应为 #RRGGBB 或 #RRGGBBAA")
+                throw fail(loc("\(field) 颜色格式应为 #RRGGBB 或 #RRGGBBAA", "\(field) color must be #RRGGBB or #RRGGBBAA", "\(field): a cor deve estar no formato #RRGGBB ou #RRGGBBAA"))
             }
             var vals = [0, 0, 0, 255]
             for i in 1..<chars.count {
@@ -2200,7 +2251,7 @@ struct KeyboardSkinSpec: Equatable {
                 case UInt8(ascii: "0")...UInt8(ascii: "9"): d = Int(c) - 48
                 case UInt8(ascii: "a")...UInt8(ascii: "f"): d = Int(c) - 87
                 case UInt8(ascii: "A")...UInt8(ascii: "F"): d = Int(c) - 55
-                default: throw fail("\(field) 颜色里有非十六进制字符")
+                default: throw fail(loc("\(field) 颜色里有非十六进制字符", "\(field) color has non-hex characters", "\(field): a cor tem caracteres que não são hexadecimais"))
                 }
                 let k = (i - 1) / 2
                 if (i - 1) % 2 == 0 { vals[k] = 0 }
@@ -2214,18 +2265,18 @@ struct KeyboardSkinSpec: Equatable {
         }
 
         if let ver = root["formatVersion"], !isNull(ver) {
-            guard let vn = (ver as? NSNumber)?.doubleValue, vn == vn.rounded() else { throw fail("formatVersion 必须是整数") }
-            if vn > Double(formatVersion) { throw fail("这个键盘皮肤使用了更新的格式，请先升级 KuroCat") }
-            if vn < 1 { throw fail("formatVersion 无效") }
+            guard let vn = (ver as? NSNumber)?.doubleValue, vn == vn.rounded() else { throw fail(loc("formatVersion 必须是整数", "formatVersion must be an integer", "formatVersion precisa ser um número inteiro")) }
+            if vn > Double(formatVersion) { throw fail(loc("这个键盘皮肤使用了更新的格式，请先升级 KuroCat", "This keyboard skin uses a newer format; please update KuroCat first", "Esta skin de teclado usa um formato mais novo; atualize o KuroCat primeiro")) }
+            if vn < 1 { throw fail(loc("formatVersion 无效", "Invalid formatVersion", "formatVersion inválido")) }
         }
-        guard let nameRaw = root["name"] as? String else { throw fail("缺少键盘皮肤名称 name") }
+        guard let nameRaw = root["name"] as? String else { throw fail(loc("缺少键盘皮肤名称 name", "Missing keyboard skin name (name)", "Falta o nome da skin de teclado (name)")) }
         let name = trimmed(nameRaw, 40)
-        if name.isEmpty { throw fail("键盘皮肤名称 name 不能为空") }
+        if name.isEmpty { throw fail(loc("键盘皮肤名称 name 不能为空", "Keyboard skin name (name) cannot be empty", "O nome da skin de teclado (name) não pode ficar vazio")) }
         var author = ""
         if let aRaw = root["author"] as? String { author = trimmed(aRaw, 40) }
 
-        guard let cols = root["colors"] as? [String: Any] else { throw fail("缺少键盘配色对象 colors") }
-        guard let key = try color(cols["key"], "colors.key") else { throw fail("缺少键帽颜色 colors.key") }
+        guard let cols = root["colors"] as? [String: Any] else { throw fail(loc("缺少键盘配色对象 colors", "Missing keyboard colors object (colors)", "Falta o objeto de cores do teclado (colors)")) }
+        guard let key = try color(cols["key"], "colors.key") else { throw fail(loc("缺少键帽颜色 colors.key", "Missing keycap color colors.key", "Falta a cor das teclas (colors.key)")) }
         let deck = try color(cols["deck"], "colors.deck") ?? .rgba(0.14, 0.14, 0.16)
         let base = try color(cols["base"], "colors.base") ?? .rgba(deck.r * 0.72, deck.g * 0.72, deck.b * 0.72)
         let keyBorder = try color(cols["keyBorder"], "colors.keyBorder") ?? .rgba(deck.r, deck.g, deck.b, 0.78)
@@ -2285,15 +2336,15 @@ final class KeyboardSkinLibrary {
     func importFile(_ url: URL) throws -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         if let size = attrs?[.size] as? NSNumber, size.intValue > KeyboardSkinSpec.maxFileBytes {
-            throw SkinError(message: "键盘皮肤文件超过 256 KB 上限")
+            throw SkinError(message: loc("键盘皮肤文件超过 256 KB 上限", "Keyboard skin file exceeds the 256 KB limit", "O arquivo de skin de teclado passa do limite de 256 KB"))
         }
-        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: "无法打开这个文件") }
+        guard let data = try? Data(contentsOf: url) else { throw SkinError(message: loc("无法打开这个文件", "Couldn't open this file", "Não foi possível abrir este arquivo")) }
         let spec = try KeyboardSkinSpec.parse(data)
         do {
             try FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
             try data.write(to: Self.directory.appendingPathComponent("\(spec.id).kurokb"), options: .atomic)
         } catch {
-            throw SkinError(message: "保存键盘皮肤失败：无法写入 \(Self.directory.path)")
+            throw SkinError(message: loc("保存键盘皮肤失败：无法写入 \(Self.directory.path)", "Couldn't save the keyboard skin: can't write to \(Self.directory.path)", "Falha ao salvar a skin de teclado: não foi possível gravar em \(Self.directory.path)"))
         }
         reload()
         return spec.id

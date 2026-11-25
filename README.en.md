@@ -14,7 +14,7 @@
 </p>
 
 <p>
-  <a href="README.md">简体中文</a> | <b>English</b> ·
+  <a href="README.md">Português (BR)</a> | <a href="README.zh-CN.md">简体中文</a> | <b>English</b> ·
   <a href="https://kurocat.cc/en/">🌐 Official Site (Live Demo)</a> ·
   <a href="https://workshop.kurocat.cc/">🎨 Skin Workshop &amp; Plaza</a> ·
   <a href="https://kurocat.cc/obs-guide/">🎥 OBS Overlay Guide</a> ·

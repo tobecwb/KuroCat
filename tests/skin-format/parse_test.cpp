@@ -22,6 +22,8 @@ static SkinSpec accepts(const std::string& json) {
 }
 
 int main() {
+    // Error-message assertions below are written against the Chinese texts.
+    kurocat::setUiLanguage(kurocat::UiLanguage::Chinese);
     // Templates + sample from the repo
     for (const char* f : {"skins/black.kurocat", "skins/siamese.kurocat", "skins/shorthair.kurocat", "skins/orangeWhite.kurocat",
                           "skins/samples/curve-regions-demo.kurocat"}) {
