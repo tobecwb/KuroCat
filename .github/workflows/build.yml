@@ -48,6 +48,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           TAG_VER="${GITHUB_REF_NAME#v}"
+          # Fork releases are tagged vX.Y.Z-ptbr.N on top of upstream X.Y.Z; Info.plist keeps the numeric X.Y.Z.
+          TAG_VER="${TAG_VER%%-ptbr.*}"
           PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
           if [ "$PLIST_VER" != "$TAG_VER" ]; then
             echo "::error::Resources/Info.plist CFBundleShortVersionString ($PLIST_VER) does not match Git tag ($GITHUB_REF_NAME)."
