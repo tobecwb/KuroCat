@@ -1,101 +1,107 @@
 <div align="center">
 
-# 🐱 KuroCat
+# 🐱 KuroCat — edição em Português (BR)
 
-**超轻量级全状态键鼠桌面萌猫 · 原生跨平台 (macOS / Windows / Linux / 统信 UOS)**
+**Gatinho de área de trabalho nativo e ultraleve · Reage ao teclado e ao mouse em tempo real (macOS / Windows / Linux / UOS)**
 
 <p>
-  <a href="https://github.com/chanke17/KuroCat/releases/latest"><img src="https://img.shields.io/github/v/release/chanke17/KuroCat?style=flat-square&color=1f6feb&label=Release" alt="Latest Release"/></a>
-  <a href="https://github.com/chanke17/KuroCat/releases"><img src="https://img.shields.io/github/downloads/chanke17/KuroCat/total?style=flat-square&color=2ea44f&label=Downloads" alt="Total Downloads"/></a>
-  <a href="https://github.com/chanke17/KuroCat/stargazers"><img src="https://img.shields.io/github/stars/chanke17/KuroCat?style=flat-square&color=e3b341&label=Stars" alt="GitHub Stars"/></a>
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20UOS-555555?style=flat-square" alt="Platforms"/>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/chanke17/KuroCat?style=flat-square&color=8957e5" alt="MIT License"/></a>
-  <a href="https://signpath.io/"><img src="https://img.shields.io/badge/Code%20Signing-SignPath.io-0098ff?style=flat-square" alt="Code Signing by SignPath.io"/></a>
+  <img src="https://img.shields.io/badge/Idioma-PT--BR%20%7C%20EN%20%7C%20中文-2ea44f?style=flat-square" alt="Idiomas"/>
+  <img src="https://img.shields.io/badge/Plataformas-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20UOS-555555?style=flat-square" alt="Plataformas"/>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/tobecwb/KuroCat?style=flat-square&color=8957e5" alt="Licença MIT"/></a>
 </p>
 
 <p>
-  <b>简体中文</b> | <a href="README.en.md">English</a> ·
-  <a href="https://kurocat.cc/">🌐 官方首页（网页试玩）</a> ·
-  <a href="https://workshop.kurocat.cc/">🎨 皮肤工坊 &amp; 广场</a> ·
-  <a href="https://kurocat.cc/obs-guide/">🎥 OBS 直播指南</a> ·
-  <a href="https://github.com/chanke17/KuroCat/releases/latest">⬇️ GitHub 下载</a> ·
-  <a href="https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L">⚡ 国内高速下载</a>
+  <b>Português (BR)</b> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.en.md">English</a> ·
+  <a href="https://github.com/tobecwb/KuroCat/releases">⬇️ Downloads deste fork</a> ·
+  <a href="https://github.com/chanke17/KuroCat">⭐ Projeto original</a>
 </p>
 
 <p>
-  <img src="assets/demo_typing.gif" width="265" alt="敲键盘打字"/>
-  <img src="assets/demo_hunting.gif" width="265" alt="快速晃鼠标捕猎大圆眼"/>
-  <img src="assets/demo_combo.gif" width="265" alt="边打字边拖鼠标 + 3键用脚按"/>
+  <img src="assets/demo_typing.gif" width="265" alt="Gato digitando no teclado"/>
+  <img src="assets/demo_hunting.gif" width="265" alt="Olhos de caçador ao mexer o mouse rápido"/>
+  <img src="assets/demo_combo.gif" width="265" alt="Digitando, arrastando o mouse e apertando a 3ª tecla com a pata traseira"/>
 </p>
 
-<sub>Native macOS (Swift + CoreGraphics + IOHIDManager) · Windows (C++17 + GDI+ + Raw Input) · Linux / 统信 UOS (C++17 + GTK3/Cairo + XInput2/evdev)</sub>
+<sub>macOS nativo (Swift + CoreGraphics + IOHIDManager) · Windows (C++17 + GDI+ + Raw Input) · Linux / UOS (C++17 + GTK3/Cairo + XInput2/evdev)</sub>
 
 </div>
 
 ---
 
-## 💡 为什么选择 KuroCat？
-
-| 对比维度 | 🐱 KuroCat | 传统 Electron / Web 桌宠 |
-| :--- | :--- | :--- |
-| **安装包体积** | **~802 KB**（Windows 单文件零依赖） | 80 MB ~ 150 MB+（捆绑 Chromium） |
-| **内存 / CPU 占用** | 原生 Swift / C++17，空闲自适应降帧至 10fps | 常驻渲染进程，内存占用高 |
-| **游戏内按键捕获** | **硬件级真全键无冲 (NKRO)**，支持 DirectX / Vulkan 游戏 | 易受输入法、游戏焦点或管理员权限拦截 |
-| **2.5D 视觉表现** | Live2D 同款球面投影转头 + 捕猎大圆眼 + 长猫拖拽 | 多为静态贴图切换 |
-| **皮肤与生态** | 在线 [2.5D 皮肤工坊](https://workshop.kurocat.cc/) + [AI MCP Server](mcp/README.md) | 改图门槛高，需手动替换资源 |
-| **隐私安全** | **100% 本地内存实时处理**，绝不记录按键与写日志 | 闭源软件难以审计 |
+> [!NOTE]
+> **Este repositório é um fork** de [chanke17/KuroCat](https://github.com/chanke17/KuroCat), criado para disponibilizar o app em **português do Brasil**.
+>
+> O que muda em relação ao original:
+> - Interface completa em **PT-BR** no macOS, Windows e Linux: menus, configurações, provador de skins, alertas, diálogos de atualização e mensagens de validação de skins.
+> - **PT-BR é o idioma padrão.** Chinês e inglês continuam disponíveis em **Configurações → Idioma**.
+> - **Atualização automática desligada** por segurança (veja [Privacidade](#-privacidade)).
+>
+> Todo o crédito pelo app vai para o autor original. Este fork segue a mesma [licença MIT](LICENSE).
 
 ---
 
-## ✨ 核心特性
+## 💡 Por que o KuroCat?
 
-- **🎮 打字 & 游戏全状态捕获（真全键无冲 NKRO）**
-  - **macOS**：双层 `IOHIDManager`（内核 HID 硬件层）+ `CGEventTap`，不受中英文输入法干扰，完整支持 `WASD` 长按、组合键、独立修饰键（`⌘ / ⇧ / ⌥ / ⌃ / Fn`）、方向键与 `F1–F12`。
-  - **Windows**：原生 `Raw Input API (RIDEV_INPUTSINK)` 硬件扫描码监听，支持 DirectX/Vulkan 游戏内按键与锁视角鼠标微动。
-  - **Linux & 统信 UOS / 麒麟**：双层 `XInput2` + 内核 `evdev`，**UOS / Deepin / Ubuntu X11 下双击即用、免 `sudo`**；纯 Wayland 加入 `input` 组即可开启硬件级监听。
-- **🌀 2.5D 球面转头 & 捕猎大圆眼**
-  - 猫头、双耳、双眼与胡须随鼠标光标产生真实的 2.5D 透视转头；键盘与鼠标 180° 朝向小猫摆放，左手键盘右手鼠标自然不交叉。
-  - 快速晃动鼠标触发**捕猎模式**：瞳孔扩张为超大圆润黑瞳 + 白色高光，身子压低伏击、尾巴加快抽动。
-- **🐾 趣味交互彩蛋**
-  - **3 键「用脚按」 & 4 键「用尾巴按」**：同时按下第 3、第 4 个键时，小猫会翘起后脚或甩出尾巴去按！
-  - **键盘跑马灯流光**：彗星追光沿键盘对角线扫过，按键越多速度越快、尾迹越长，色相每圈轮转（可在右键菜单单独开关）。
-  - **摸头互动 & 打瞌睡**：轻撸猫头触发惬意闭眼 `— —` 与微光粒子，闲置久了自动打瞌睡冒 `z`。
-  - **游戏防误触穿透 & 开机自启**：透明区域自动穿透，支持「完全鼠标穿透」、开机自启与自动更新检测。
-- **🎨 皮肤工坊、多配色 & 统计**
-  - 内置多款原生皮肤（经典小黑猫 / 挖煤暹罗猫 / 美短 / 橘白猫 / 狸花猫），支持导入社区 `.kurocat` 皮肤与 `.kurokb` 键盘。
-  - 3 套键盘配色、6+ 种瞳色、5 档尺寸缩放，自带今日击键数与实时 KPM 统计。
+| Recurso | 🐱 KuroCat | Pets em Electron / Web |
+| :--- | :--- | :--- |
+| **Tamanho** | **~802 KB** (um único `.exe` sem dependências no Windows) | 80 MB – 150 MB+ (Chromium embutido) |
+| **Consumo** | Swift / C++17 nativo, reduz para 30/20/10 fps quando ocioso | Processo de renderização pesado em segundo plano |
+| **Em jogos** | **Captura de hardware NKRO real**, funciona em jogos DirectX / Vulkan | Costuma ser bloqueado por IME, foco do jogo ou UAC |
+| **Animação 2.5D** | Cabeça esférica estilo Live2D, "olhos de caçador" e gato que estica ao arrastar | Troca de sprites estáticos |
+| **Skins** | [Oficina de skins 2.5D](https://workshop.kurocat.cc/) online + [servidor MCP para IA](mcp/README.md) | Edição manual de imagens |
+| **Privacidade** | **Processamento 100% local, em memória**, nenhuma tecla é registrada | Código fechado ou cheio de telemetria |
+
+---
+
+## ✨ Destaques
+
+- **🎮 Captura completa de teclado e mouse, para digitar e jogar (NKRO real)**
+  - **macOS**: duas camadas, `IOHIDManager` (nível HID do kernel) + `CGEventTap`, sem interferência da troca de método de entrada. Suporta segurar `WASD`, combinações, modificadores sozinhos (`⌘ / ⇧ / ⌥ / ⌃ / Fn`), setas e `F1–F12`.
+  - **Windows**: captura de scan codes via `Raw Input API (RIDEV_INPUTSINK)`, que acompanha teclas e micro-movimentos do mouse até dentro de jogos DirectX/Vulkan.
+  - **Linux e UOS / Kylin**: duas camadas, `XInput2` + `evdev` do kernel. **Funciona sem `sudo` no UOS / Deepin / Ubuntu X11.** No Wayland, adicione seu usuário ao grupo `input`.
+- **🌀 Cabeça esférica 2.5D e olhos de caçador**
+  - Cabeça, orelhas, olhos e bigodes giram em perspectiva 2.5D seguindo o cursor. Teclado e mouse ficam de frente para o gato, espelhando a postura natural de mão esquerda no teclado e direita no mouse.
+  - Balance o mouse rápido para ativar o **modo caçador**: as pupilas viram bolinhas enormes e brilhantes, o gato se agacha e abana a cauda mais rápido.
+- **🐾 Detalhes interativos**
+  - **Pata traseira na 3ª tecla e cauda na 4ª**: segure 3 ou 4 teclas ao mesmo tempo e o gato levanta a pata traseira ou enrola a cauda para apertar a tecla extra.
+  - **Luz RGB animada no teclado**: um rastro de luz atravessa o teclado na diagonal, mais rápido e mais longo quanto mais teclas você segura (pode ser desligado).
+  - **Carinho e soneca**: faça carinho na cabeça e ele fecha os olhos `— —` com partículas brilhantes; deixe parado e ele dorme soltando `z`s.
+  - **Ignorar cliques e abrir ao iniciar sessão**: áreas transparentes deixam o clique passar. Também dá para ativar **Ignorar cliques** (para jogos competitivos), **Abrir ao iniciar sessão** e os avisos de atualização.
+- **🎨 Skins, temas e estatísticas**
+  - Skins nativas (Gatinho preto clássico, Siamês, Pelo curto tigrado prateado, Laranja e branco, Tigrado marrom) e skins da comunidade em `.kurocat` e teclados em `.kurokb`.
+  - 3 temas de teclado, mais de 6 cores de olhos, 5 tamanhos, contador de teclas do dia e KPM ao vivo.
 
 <details>
-<summary><b>🖼️ 查看内置皮肤 6 态效果预览（点击展开）</b></summary>
+<summary><b>🖼️ Prévia das skins nativas (clique para abrir)</b></summary>
 <br/>
 
-| 经典小黑猫 | 挖煤暹罗猫 |
+| Gatinho preto clássico | Gato siamês |
 | :---: | :---: |
-| <img src="assets/preview_black.jpg" width="420" alt="经典小黑猫预览"/> | <img src="assets/preview_siamese.jpg" width="420" alt="挖煤暹罗猫预览"/> |
+| <img src="assets/preview_black.jpg" width="420" alt="Prévia do gatinho preto clássico"/> | <img src="assets/preview_siamese.jpg" width="420" alt="Prévia do gato siamês"/> |
 
-| 美短（银虎斑加白） | 橘白猫 |
+| Pelo curto tigrado prateado | Gato laranja e branco |
 | :---: | :---: |
-| <img src="assets/preview_shorthair.jpg" width="420" alt="美短六态预览"/> | <img src="assets/preview_orangeWhite.jpg" width="420" alt="橘白猫六态预览"/> |
+| <img src="assets/preview_shorthair.jpg" width="420" alt="Prévia do pelo curto"/> | <img src="assets/preview_orangeWhite.jpg" width="420" alt="Prévia do gato laranja e branco"/> |
 
 <p align="center">
-  <img src="assets/preview_tabby_windows.png" width="520" alt="原版小黑猫与狸花猫对比"/>
+  <img src="assets/preview_tabby_windows.png" width="520" alt="Gatinho preto e tigrado marrom sentados digitando"/>
 </p>
 
 </details>
 
 ---
 
-## 📦 快速安装与使用
+## 📦 Baixar e executar
 
-前往 **[GitHub Releases](https://github.com/chanke17/KuroCat/releases/latest)**（或 [国内高速直链](https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L)）下载对应平台安装包：
+Os binários desta edição em PT-BR são gerados pelo GitHub Actions deste fork. Eles ficam na aba **[Releases](https://github.com/tobecwb/KuroCat/releases)** (versões marcadas com tag) ou como artefatos na aba **[Actions](https://github.com/tobecwb/KuroCat/actions)**.
 
-### 🍎 macOS (Apple Silicon & Intel 通用 · macOS 11+)
-1. 下载 `KuroCat-macOS-universal.zip` 解压，将 `KuroCat.app` 拖入「应用程序」打开（常驻顶部菜单栏，不占 Dock）。
-2. 首次使用按底部提示前往 **系统设置 → 隐私与安全性 → 输入监控** 勾选 `KuroCat`，在菜单栏点「重启 KuroCat」即可。
-3. 开启「完全鼠标穿透」后，可通过菜单栏图标或 **按住 `⌥ Option` 右键/拖动小猫**。
+### 🍎 macOS (Universal: Apple Silicon e Intel · macOS 11+)
+1. Baixe `KuroCat-macOS-universal.zip`, descompacte e arraste `KuroCat.app` para **Aplicativos**. O app fica na barra de menus, sem ícone no Dock.
+2. Clique no aviso que aparece embaixo do gato para liberar o `KuroCat` em **Ajustes do Sistema → Privacidade e Segurança → Monitoramento de Entrada**. Depois use **Reiniciar KuroCat** no menu.
+3. Com **Ignorar cliques** ativo, use o ícone da barra de menus ou **segure `⌥ Option` para clicar com o botão direito / arrastar**.
 
 <details>
-<summary>🛠️ macOS 本地源码编译</summary>
+<summary>🛠️ Compilar no macOS</summary>
 
 ```bash
 chmod +x build.sh
@@ -106,109 +112,101 @@ open KuroCat.app
 </details>
 
 ### 🪟 Windows (Windows 7 SP1 / 8 / 10 / 11 x64)
-1. 下载单文件 `KuroCat-Windows-x64.exe`（约 **802 KB**，零运行时依赖），双击即用，常驻右下角系统托盘。
-2. 开启「完全鼠标穿透」后可通过以下任意方式操作：
-   - 全局快捷键 **`Ctrl + Alt + Shift + P`** 一键切换穿透；
-   - 按住 **`Alt`** 键临时解锁（可右键菜单或左键拖动）；
-   - 点击任务栏托盘区小猫图标，或 **再次双击 `KuroCat.exe`** 自动解除穿透并弹出菜单。
+1. Baixe o `KuroCat-Windows-x64.exe` (~**802 KB**, sem dependências externas). Dê dois cliques para abrir; ele fica na bandeja do sistema.
+2. Com **Ignorar cliques** ativo, você pode abrir o menu ou sair a qualquer momento:
+   - Atalho global: **`Ctrl + Alt + Shift + P`**;
+   - Desbloqueio temporário: segure **`Alt`** e clique com o botão direito / arraste o gato;
+   - Ícone na bandeja, ou **abra o `KuroCat.exe` de novo** para desativar o Ignorar cliques e abrir o menu.
 
 <details>
-<summary>❓ Windows 常见问题 & 本地编译</summary>
+<summary>❓ Dúvidas no Windows e como compilar</summary>
 
-- **游戏里只跟鼠标不跟键盘？** 游戏以管理员权限运行时会被系统拦截输入，右键小猫 →「以管理员身份重新启动」（或勾选「每次启动都以管理员身份运行」）。
-- **进游戏小猫消失？** 若游戏使用「独占全屏」，请改为「无边框窗口 / 窗口化全屏」，小猫会自动重新置顶。
-- **下载了新版仍提示更新？** 旧版仍在后台运行，新版启动时会自动接管，也可按提示路径删除旧版 `.exe`。
+- **Segue o mouse mas não o teclado num jogo?** Jogos executados como Administrador isolam as teclas de apps comuns. Clique com o botão direito no gato → **Reiniciar como administrador** (ou ative **Sempre executar como administrador**).
+- **O gato some no jogo?** Troque o jogo de *Tela cheia exclusiva* para *Janela sem bordas / Tela cheia em janela*.
+- **Continua pedindo atualização depois de baixar?** Um processo antigo ainda estava aberto; as versões novas fecham as antigas ao iniciar.
 
-**本地编译（MSVC / MinGW / CMake）：**
+**Compilar (MSVC / MinGW / CMake):**
 ```bat
 cd windows
 build.bat
-:: 或使用 CMake
+:: Ou via CMake
 cmake -B build && cmake --build build --config Release
 ```
 
 </details>
 
-### 🐧 Linux & 统信 UOS / 银河麒麟 (x86_64 & ARM64)
-支持 **Ubuntu 20.04+ / Debian 11+ / Deepin / 统信 UOS / 银河麒麟 / Arch / Fedora**：
+### 🐧 Linux e UOS / Kylin (x86_64 e ARM64)
+Funciona em **Ubuntu 20.04+ / Debian 11+ / Deepin / UOS / Kylin / Arch / Fedora**:
 
-1. **免密码安装（推荐 UOS / 麒麟）**：下载 `KuroCat-Linux-x86_64.tar.gz` 或 `KuroCat-Linux-arm64.tar.gz` 解压，执行 `bash install.sh`（安装至 `~/.local`，无需 sudo；卸载执行 `bash uninstall.sh`）。
-2. **`.deb` 安装包**：
+1. **Instalação sem senha (recomendada no UOS / Kylin)**: extraia `KuroCat-Linux-x86_64.tar.gz` ou `KuroCat-Linux-arm64.tar.gz` e rode `bash install.sh`. Ele instala em `~/.local` sem `sudo`; `bash uninstall.sh` remove.
+2. **Pacote `.deb`**:
    ```bash
    sudo apt install ./KuroCat-Linux-amd64.deb
    ```
 
 <details>
-<summary>❓ Linux / Wayland / 龙芯源码编译说明</summary>
+<summary>❓ Linux / Wayland / como compilar</summary>
 
-- **Wayland 会话**：执行一次 `sudo usermod -aG input $USER` 并重新登录即可启用 `evdev` 内核级监听。
-- **麒麟安装被拦截**：「安全中心 → 应用保护 / 应用执行控制」设为「警告」或「关闭」，或改用免密码 `install.sh`。
-- **性能优化**：默认采用省电自适应帧率（30 / 20 / 10 fps），低配设备建议保持关闭菜单中的「高帧率 60fps」。
-- **源码编译（含 LoongArch / MIPS）**：
+- **Sessões Wayland**: rode `sudo usermod -aG input $USER` uma vez e entre de novo na sessão para ativar a captura via `evdev`.
+- **O Kylin bloqueia a instalação do `.deb`?** Coloque *Central de Segurança → Proteção de apps / Controle de execução* em Avisar ou Desligado, ou use o `install.sh`.
+- **Compilar (inclusive LoongArch)**:
   ```bash
   sudo apt install g++ pkg-config libgtk-3-dev libcairo2-dev libx11-dev libxi-dev
   cd linux && chmod +x build.sh build_deb.sh
-  ./build.sh        # 编译可执行文件
-  ./build_deb.sh    # 一键打包 .deb 安装包
+  ./build.sh        # Compila o binário
+  ./build_deb.sh    # Gera o instalador .deb
   ```
 
 </details>
 
 ---
 
-## 🌐 生态与工具
+## 🌐 Ecossistema e ferramentas (do projeto original)
 
-| 项目 / 入口 | 链接 | 说明 |
+| Recurso | Link | Descrição |
 | :--- | :--- | :--- |
-| **官方网站** | [kurocat.cc](https://kurocat.cc/) · [English](https://kurocat.cc/en/) | 网页内直接试玩 2.5D 桌宠、三端 SHA-256 校验下载 |
-| **在线皮肤工坊 & 广场** | [workshop.kurocat.cc](https://workshop.kurocat.cc/) | 照片取色捏猫、贝塞尔花纹画板、免费下载社区 `.kurocat` 皮肤与 `.kurokb` 键盘 |
-| **OBS 直播配置指南** | [kurocat.cc/obs-guide](https://kurocat.cc/obs-guide/) | OBS 透明捕获 / `#00FF00` 绿幕抠像、抖音直播伴侣、B 站直播姬教程 |
-| **KuroCat MCP Server** | [mcp/README.md](mcp/README.md) | 零依赖 Node.js MCP Server：让 Claude / Cursor / Antigravity 直接 AI 捏猫与安装皮肤 |
-| **皮肤格式规范** | [docs/skin-format.md](docs/skin-format.md) | `.kurocat` v1 完整字段规范与坐标图解 |
+| **Site oficial** | [kurocat.cc/en/](https://kurocat.cc/en/) · [中文](https://kurocat.cc/) | Demonstração interativa 2.5D no navegador e perguntas frequentes |
+| **Oficina e praça de skins** | [workshop.kurocat.cc](https://workshop.kurocat.cc/) | Editor de skins 2.5D no navegador + skins `.kurocat` e teclados `.kurokb` gratuitos |
+| **Guia do OBS** | [kurocat.cc/obs-guide](https://kurocat.cc/obs-guide/) | Captura de janela transparente, tela verde `#00FF00` e configuração para jogos |
+| **Servidor MCP do KuroCat** | [mcp/README.md](mcp/README.md) | Servidor MCP em Node.js, sem dependências, para Claude, Cursor e Antigravity criarem e instalarem skins |
+| **Formato de skin** | [docs/skin-format.md](docs/skin-format.md) | Referência do esquema `.kurocat` v1 e diagrama de coordenadas |
+
+Esses sites são mantidos pelo autor original e estão em chinês/inglês.
 
 ---
 
-## 🤝 参与贡献
+## 🤝 Contribuindo
 
-- **投稿皮肤 / 键盘**：前往 [KuroCat-Workshop](https://github.com/chanke17/KuroCat-Workshop) 提交 PR，即可上线到 [皮肤广场](https://workshop.kurocat.cc/) 供所有玩家一键下载。
-- **代码与问题反馈**：欢迎提交 [Issue](https://github.com/chanke17/KuroCat/issues) 或 Pull Request 改进三端体验。
+- **Traduções e correções em PT-BR**: abra uma [Issue](https://github.com/tobecwb/KuroCat/issues) ou um Pull Request neste fork.
+- **Bugs e recursos do app em geral**: prefira reportar no [projeto original](https://github.com/chanke17/KuroCat/issues), para beneficiar todo mundo.
+- **Skins e teclados**: envie um PR para o [KuroCat-Workshop](https://github.com/chanke17/KuroCat-Workshop) para publicar suas criações na praça da comunidade.
 
 <details>
-<summary><b>📁 项目目录结构</b></summary>
+<summary><b>📁 Estrutura do projeto</b></summary>
 
 ```text
 KuroCat/
-├── Sources/                    # macOS 原生 Swift 源码 (Universal)
-├── Resources/                  # macOS Info.plist & AppIcon.icns
-├── build.sh                    # macOS 编译脚本
-├── windows/                    # Windows 原生 C++17 (Win32 + GDI+ + Raw Input)
-├── linux/                      # Linux & UOS 原生 C++17 (GTK3 + Cairo + XInput2 + evdev)
-├── mcp/                        # KuroCat MCP Server (Node.js 零依赖)
-├── docs/                       # 皮肤格式规范与截图文档
-└── .github/workflows/build.yml # 全平台自动构建与发版工作流
+├── Sources/                    # Código Swift nativo do macOS (Universal)
+├── Resources/                  # Info.plist e AppIcon.icns do macOS
+├── build.sh                    # Script de build universal do macOS
+├── windows/                    # C++17 nativo do Windows (Win32 + GDI+ + Raw Input)
+├── linux/                      # C++17 nativo do Linux e UOS (GTK3 + Cairo + XInput2 + evdev)
+├── shared/                     # Código C++ compartilhado (formato de skin, idioma da interface)
+├── mcp/                        # Servidor MCP em Node.js, sem dependências
+├── docs/                       # Especificação do formato de skin e capturas de tela
+└── .github/workflows/build.yml # Build automatizado multiplataforma
 ```
 
 </details>
 
 ---
 
-## 🔒 隐私与代码签名
+## 🔒 Privacidade
 
-- **隐私承诺**：KuroCat 的所有键鼠硬件信号**仅在本地内存实时驱动桌宠动画与计数**，**绝不记录按键内容、绝不写日志**；除检查更新外无任何联网行为，源码完全开源可审计。
-- **Code Signing Policy**：Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
-  - **Committers & Reviewers**: Project maintainers of `chanke17/KuroCat` (reproducibly built via GitHub Actions).
-  - **Approvers**: Repository owner (`chanke17`).
+- Todos os sinais de teclado e mouse são processados **apenas na memória local, em tempo real**. Nenhuma tecla é registrada nem salva.
+- **Neste fork a atualização automática está desligada.** O app original baixava e instalava executáveis de um servidor de terceiros sem verificar assinatura nem hash. Aqui, "Verificar atualizações" apenas abre a página de [Releases deste fork](https://github.com/tobecwb/KuroCat/releases) no navegador, e o app não faz requisições de rede por conta própria.
+- A assinatura de código via [SignPath.io](https://signpath.io/) citada no projeto original vale só para os binários publicados por `chanke17/KuroCat`. **Os binários deste fork não são assinados.**
 
-## ⭐ Star History
+## 📄 Licença
 
-<a href="https://star-history.com/#chanke17/KuroCat&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chanke17/KuroCat&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chanke17/KuroCat&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chanke17/KuroCat&type=Date" width="600" />
- </picture>
-</a>
-
-## 📄 License
-
-Released under the [MIT License](LICENSE).
+Distribuído sob a [licença MIT](LICENSE), a mesma do projeto original.
