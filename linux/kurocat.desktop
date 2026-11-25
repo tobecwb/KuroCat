@@ -1,8 +1,10 @@
 [Desktop Entry]
 Name=KuroCat
 Name[zh_CN]=KuroCat 黑猫键盘桌宠
+Name[pt_BR]=KuroCat – gatinho de teclado
 Comment=Full-state keyboard & mouse desktop cat pet (Black Cat & Siamese)
 Comment[zh_CN]=打字/游戏全状态监听键盘小黑猫与暹罗猫桌宠
+Comment[pt_BR]=Gatinho de mesa que reage a todo o teclado e mouse (gato preto e siamês)
 Exec=/usr/bin/kurocat
 Icon=kurocat
 Terminal=false

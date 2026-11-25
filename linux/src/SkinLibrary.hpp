@@ -15,6 +15,7 @@
 #include <vector>
 #include "../../shared/SkinSpec.hpp"
 #include "../../shared/KeyboardSkinSpec.hpp"
+#include "../../shared/UiLanguage.hpp"
 
 struct SkinLibrary {
     std::vector<SkinSpec> skins; // sorted by name
@@ -93,25 +94,25 @@ struct SkinLibrary {
     // Validates `path`, copies it into the skins folder and returns the new skin's id.
     bool importFile(const std::string& path, std::string& idOut, std::string& error) {
         FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) { error = "无法打开这个文件"; return false; }
+        if (!f) { error = kurocat::uiText("无法打开这个文件", "Can't open this file", "Não foi possível abrir este arquivo"); return false; }
         std::string bytes;
         char buf[65536];
         size_t n;
         while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
             bytes.append(buf, n);
-            if (bytes.size() > SkinSpec::MaxFileBytes) { std::fclose(f); error = "皮肤文件超过 2 MB 上限"; return false; }
+            if (bytes.size() > SkinSpec::MaxFileBytes) { std::fclose(f); error = kurocat::uiText("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo da skin passa do limite de 2 MB"); return false; }
         }
         std::fclose(f);
         SkinSpec spec;
         if (!SkinSpec::parse(bytes, spec, error)) return false;
-        if (!ensureDir()) { error = "无法创建皮肤文件夹 " + dir(); return false; }
+        if (!ensureDir()) { error = std::string(kurocat::uiText("无法创建皮肤文件夹 ", "Can't create the skins folder ", "Não foi possível criar a pasta de skins ")) + dir(); return false; }
         std::string target = dir() + "/" + spec.id + ".kurocat";
         std::string tmp = target + ".tmp";
         FILE* o = std::fopen(tmp.c_str(), "wb");
-        if (!o) { error = "无法写入皮肤文件夹 " + dir(); return false; }
+        if (!o) { error = std::string(kurocat::uiText("无法写入皮肤文件夹 ", "Can't write to the skins folder ", "Não foi possível gravar na pasta de skins ")) + dir(); return false; }
         bool ok = std::fwrite(bytes.data(), 1, bytes.size(), o) == bytes.size();
         ok = (std::fclose(o) == 0) && ok;
-        if (!ok || std::rename(tmp.c_str(), target.c_str()) != 0) { unlink(tmp.c_str()); error = "保存皮肤失败（磁盘已满或没有权限？）"; return false; }
+        if (!ok || std::rename(tmp.c_str(), target.c_str()) != 0) { unlink(tmp.c_str()); error = kurocat::uiText("保存皮肤失败（磁盘已满或没有权限？）", "Couldn't save the skin (disk full or no permission?)", "Não foi possível salvar a skin (disco cheio ou sem permissão?)"); return false; }
         idOut = spec.id;
         reload();
         return true;
@@ -220,27 +221,27 @@ struct KeyboardSkinLibrary {
     // Validates `path`, copies it into the keyboards folder and returns the new skin's id.
     bool importFile(const std::string& path, std::string& outId, std::string& error) {
         FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) { error = "无法打开这个文件"; return false; }
+        if (!f) { error = kurocat::uiText("无法打开这个文件", "Can't open this file", "Não foi possível abrir este arquivo"); return false; }
         std::string bytes;
         char buf[32768];
         size_t n;
         while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
             bytes.append(buf, n);
-            if (bytes.size() > KeyboardSkinSpec::MaxFileBytes) { std::fclose(f); error = "键盘皮肤文件超过 256 KB 上限"; return false; }
+            if (bytes.size() > KeyboardSkinSpec::MaxFileBytes) { std::fclose(f); error = kurocat::uiText("键盘皮肤文件超过 256 KB 上限", "Keyboard skin file exceeds the 256 KB limit", "O arquivo da skin de teclado passa do limite de 256 KB"); return false; }
         }
         std::fclose(f);
         KeyboardSkinSpec spec;
         if (!KeyboardSkinSpec::parse(bytes, spec, error)) return false;
-        if (!ensureDir()) { error = "无法创建键盘皮肤文件夹 " + directory(); return false; }
+        if (!ensureDir()) { error = std::string(kurocat::uiText("无法创建键盘皮肤文件夹 ", "Can't create the keyboard skins folder ", "Não foi possível criar a pasta de skins de teclado ")) + directory(); return false; }
         std::string target = directory() + "/" + spec.id + ".kurokb";
         std::string tmp = target + ".tmp";
         FILE* o = std::fopen(tmp.c_str(), "wb");
-        if (!o) { error = "无法写入键盘皮肤文件夹 " + directory(); return false; }
+        if (!o) { error = std::string(kurocat::uiText("无法写入键盘皮肤文件夹 ", "Can't write to the keyboard skins folder ", "Não foi possível gravar na pasta de skins de teclado ")) + directory(); return false; }
         bool ok = std::fwrite(bytes.data(), 1, bytes.size(), o) == bytes.size();
         ok = (std::fclose(o) == 0) && ok;
         if (!ok || std::rename(tmp.c_str(), target.c_str()) != 0) {
             unlink(tmp.c_str());
-            error = "保存键盘皮肤失败（磁盘已满或没有权限？）";
+            error = kurocat::uiText("保存键盘皮肤失败（磁盘已满或没有权限？）", "Couldn't save the keyboard skin (disk full or no permission?)", "Não foi possível salvar a skin de teclado (disco cheio ou sem permissão?)");
             return false;
         }
         outId = spec.id;

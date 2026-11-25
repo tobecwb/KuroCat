@@ -13,6 +13,7 @@
 #include "KeyMap.hpp"
 #include "InputEngine.hpp"
 #include "../../shared/SkinSpec.hpp"
+#include "../../shared/UiLanguage.hpp"
 
 enum class CatCoatTheme : int {
     ClassicBlack = 0,
@@ -53,7 +54,9 @@ struct CatSettings {
     bool whiteOutline = true;
     bool enableAnger = true;
     bool enableDragAnimation = true;
-    bool isEnglish = false;
+    // UI language (config key "language" = zh / en / pt). New installs default to Portuguese.
+    kurocat::UiLanguage language = kurocat::UiLanguage::Portuguese;
+    bool isEnglish() const { return language == kurocat::UiLanguage::English; }
     bool isEditMode = false; // runtime-only interactive resize & rotate box
     bool petInteraction = true;
     bool fullClickThrough = false;
@@ -85,9 +88,19 @@ struct CatSettings {
         return dir;
     }
 
+    static const char* languageCode(kurocat::UiLanguage lang) {
+        switch (lang) {
+            case kurocat::UiLanguage::Chinese: return "zh";
+            case kurocat::UiLanguage::English: return "en";
+            default: return "pt";
+        }
+    }
+
     void load() {
         std::ifstream f(configPath() + "/config.ini");
-        if (!f.is_open()) return;
+        if (!f.is_open()) { kurocat::setUiLanguage(language); return; }
+        bool hasLanguageKey = false;
+        bool legacyEnglish = false;
         std::string line;
         while (std::getline(f, line)) {
             auto eq = line.find('=');
@@ -111,7 +124,13 @@ struct CatSettings {
                 else if (k == "whiteOutline") whiteOutline = (std::stoi(v) != 0);
                 else if (k == "enableAnger") enableAnger = (std::stoi(v) != 0);
                 else if (k == "enableDragAnimation") enableDragAnimation = (std::stoi(v) != 0);
-                else if (k == "isEnglish") isEnglish = (std::stoi(v) != 0);
+                else if (k == "isEnglish") legacyEnglish = (std::stoi(v) != 0);
+                else if (k == "language") {
+                    while (!v.empty() && (v.back() == '\r' || v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                    if (v == "zh") { language = kurocat::UiLanguage::Chinese; hasLanguageKey = true; }
+                    else if (v == "en") { language = kurocat::UiLanguage::English; hasLanguageKey = true; }
+                    else if (v == "pt") { language = kurocat::UiLanguage::Portuguese; hasLanguageKey = true; }
+                }
                 else if (k == "petInteraction") petInteraction = (std::stoi(v) != 0);
                 else if (k == "fullClickThrough") fullClickThrough = (std::stoi(v) != 0);
                 else if (k == "alwaysOnTop") alwaysOnTop = (std::stoi(v) != 0);
@@ -131,6 +150,9 @@ struct CatSettings {
                 else if (k == "posY") posY = std::stoi(v);
             } catch (...) {}
         }
+        // Configs written before the language key: keep English users on English, move everyone else to Portuguese.
+        if (!hasLanguageKey) language = legacyEnglish ? kurocat::UiLanguage::English : kurocat::UiLanguage::Portuguese;
+        kurocat::setUiLanguage(language);
         KeyboardLayout::levelKeyboard() = levelKeyboard;
     }
 
@@ -157,7 +179,8 @@ struct CatSettings {
           << "whiteOutline=" << (whiteOutline ? 1 : 0) << "\n"
           << "enableAnger=" << (enableAnger ? 1 : 0) << "\n"
           << "enableDragAnimation=" << (enableDragAnimation ? 1 : 0) << "\n"
-          << "isEnglish=" << (isEnglish ? 1 : 0) << "\n"
+          << "language=" << languageCode(language) << "\n"
+          << "isEnglish=" << (isEnglish() ? 1 : 0) << "\n" // legacy key, read by older builds
           << "petInteraction=" << (petInteraction ? 1 : 0) << "\n"
           << "fullClickThrough=" << (fullClickThrough ? 1 : 0) << "\n"
           << "alwaysOnTop=" << (alwaysOnTop ? 1 : 0) << "\n"
@@ -530,9 +553,8 @@ public:
             pupilScale.target = 1.12f;
             earTwitch.velocity -= 2.2f;
             if (settings.showMouseBadges) {
-                std::string lbl = settings.isEnglish
-                    ? (button == 0 ? "LMB" : (button == 1 ? "RMB" : "MMB"))
-                    : ((button == 0) ? "左键" : (button == 1 ? "右键" : "中键"));
+                std::string lbl = (button == 0) ? kurocat::uiText("左键", "LMB", "Esq")
+                    : (button == 1 ? kurocat::uiText("右键", "RMB", "Dir") : kurocat::uiText("中键", "MMB", "Meio"));
                 Pt pt = { MouseBaseCenter.x + mouseOffset.point().x, MouseBaseCenter.y + mouseOffset.point().y - 6.0f };
                 spawnFloatingKeycap(lbl, pt, now);
             }

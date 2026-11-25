@@ -44,6 +44,7 @@ else
 [Desktop Entry]
 Name=KuroCat
 Name[zh_CN]=KuroCat 黑猫键盘桌宠
+Name[pt_BR]=KuroCat – gatinho de teclado
 Exec="$BIN_DIR/kurocat"
 Icon=kurocat
 Terminal=false
