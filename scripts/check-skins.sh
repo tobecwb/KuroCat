@@ -26,4 +26,5 @@ swiftc -module-cache-path "$CHECK_DIR/cache" \
  "$CHECK_DIR/CatPhysics.swift" "$CHECK_DIR/LegacyRenderer.swift" "$CHECK_DIR/CurrentRenderer.swift" \
  "$ROOT/tests/skins/main.swift" -o "$CHECK_DIR/check" \
  -framework AppKit -framework CoreGraphics -framework QuartzCore -framework IOKit -framework ApplicationServices
-KUROCAT_ROOT="$ROOT" "$CHECK_DIR/check" "${1:-$CHECK_DIR}"
+# Expected skin error texts are the Chinese ones.
+KUROCAT_LANGUAGE=zh KUROCAT_ROOT="$ROOT" "$CHECK_DIR/check" "${1:-$CHECK_DIR}"

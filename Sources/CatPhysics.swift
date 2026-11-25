@@ -258,7 +258,9 @@ final class CatSettings {
         whiteOutline = d.object(forKey: "KuroCat.WhiteOutline") as? Bool ?? true
         enableAnger = d.object(forKey: "KuroCat.EnableAnger") as? Bool ?? true
         enableDragAnimation = d.object(forKey: "KuroCat.EnableDragAnimation") as? Bool ?? true
-        language = d.string(forKey: "KuroCat.Language") ?? "pt"
+        // KUROCAT_LANGUAGE (zh/en/pt) overrides the saved language for this process only; used by tests.
+        let envLanguage = ProcessInfo.processInfo.environment["KUROCAT_LANGUAGE"].flatMap { ["zh", "en", "pt"].contains($0) ? $0 : nil }
+        language = envLanguage ?? d.string(forKey: "KuroCat.Language") ?? "pt"
         petInteraction = d.object(forKey: "KuroCat.PetInteraction") as? Bool ?? true
         fullClickThrough = d.object(forKey: "KuroCat.FullClickThrough") as? Bool ?? false
         fullScreenOverlay = d.object(forKey: "KuroCat.FullScreenOverlay") as? Bool ?? true
@@ -1652,12 +1654,13 @@ struct SkinSpec {
 
     // MARK: Built-in coats (exact colours of the pre-SkinSpec CoreGraphics renderer)
 
-    static func builtIn(_ coat: CatCoatTheme) -> SkinSpec {
-        let theme: CatCoatTheme = builtIns[coat] != nil ? coat : .classicBlack
-        var spec = builtIns[theme]!
-        // Built-in names are cached in Chinese; show them in the current UI language.
-        if CatSettings.shared.language != "zh" { spec.name = theme.displayName }
-        return spec
+    static func builtIn(_ coat: CatCoatTheme) -> SkinSpec { builtIns[coat] ?? builtIns[.classicBlack]! }
+
+    /// Name to show in the UI: built-in skins keep their Chinese `name` as data and are
+    /// shown in the current UI language; imported skins show the name from their file.
+    var displayName: String {
+        guard builtIn, let coat = CatCoatTheme.allCases.first(where: { SkinSpec.builtIn($0).id == id }) else { return name }
+        return CatSettings.shared.language == "zh" ? name : coat.displayName
     }
 
     private static let builtIns: [CatCoatTheme: SkinSpec] = {

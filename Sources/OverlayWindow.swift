@@ -1177,7 +1177,7 @@ final class DressingRoomWindowController: NSWindowController {
     /// Re-reads the worn skin (name, author, live preview).
     func refresh() {
         let skin = CatSettings.shared.activeSkin
-        nameLabel.stringValue = skin.name
+        nameLabel.stringValue = skin.displayName
         authorLabel.stringValue = skin.author.isEmpty ? "" : loc("作者 \(skin.author)", "By \(skin.author)", "Por \(skin.author)")
         let footerPath = (SkinLibrary.directory.path as NSString).abbreviatingWithTildeInPath
         footerLabel.stringValue = loc("皮肤独立保存在 \(footerPath)（软件更新会自动保留）  ·  右键小猫 → 猫咪皮肤 可切换或备份",
