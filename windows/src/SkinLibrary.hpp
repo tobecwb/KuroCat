@@ -8,6 +8,7 @@
 #include <vector>
 #include "../../shared/SkinSpec.hpp"
 #include "../../shared/KeyboardSkinSpec.hpp"
+#include "../../shared/UiLanguage.hpp"
 
 inline std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return std::wstring();
@@ -67,18 +68,20 @@ struct SkinLibrary {
 
     static bool readFile(const std::wstring& path, std::string& bytes, std::string& error) {
         HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法打开这个文件"; return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = kurocat::uiText("无法打开这个文件", "Couldn't open this file", "Não foi possível abrir este arquivo"); return false; }
         LARGE_INTEGER size = {};
         if (!GetFileSizeEx(h, &size) || size.QuadPart > (LONGLONG)SkinSpec::MaxFileBytes) {
             CloseHandle(h);
-            error = size.QuadPart > (LONGLONG)SkinSpec::MaxFileBytes ? "皮肤文件超过 2 MB 上限" : "无法读取这个文件";
+            error = size.QuadPart > (LONGLONG)SkinSpec::MaxFileBytes
+                ? kurocat::uiText("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB")
+                : kurocat::uiText("无法读取这个文件", "Couldn't read this file", "Não foi possível ler este arquivo");
             return false;
         }
         bytes.assign((size_t)size.QuadPart, '\0');
         DWORD read = 0;
         BOOL ok = bytes.empty() || ReadFile(h, &bytes[0], (DWORD)bytes.size(), &read, nullptr);
         CloseHandle(h);
-        if (!ok || read != bytes.size()) { error = "无法读取这个文件"; return false; }
+        if (!ok || read != bytes.size()) { error = kurocat::uiText("无法读取这个文件", "Couldn't read this file", "Não foi possível ler este arquivo"); return false; }
         return true;
     }
 
@@ -108,17 +111,17 @@ struct SkinLibrary {
         if (!readFile(path, bytes, error)) return false;
         SkinSpec spec;
         if (!SkinSpec::parse(bytes, spec, error)) return false;
-        if (!ensureDir()) { error = "无法创建皮肤文件夹 " + wideToUtf8(dir()); return false; }
+        if (!ensureDir()) { error = std::string(kurocat::uiText("无法创建皮肤文件夹 ", "Couldn't create the skins folder ", "Não foi possível criar a pasta de skins ")) + wideToUtf8(dir()); return false; }
         std::wstring target = dir() + L"\\" + utf8ToWide(spec.id) + L".kurocat";
         std::wstring tmp = target + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法写入皮肤文件夹 " + wideToUtf8(dir()); return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = std::string(kurocat::uiText("无法写入皮肤文件夹 ", "Couldn't write to the skins folder ", "Não foi possível gravar na pasta de skins ")) + wideToUtf8(dir()); return false; }
         DWORD written = 0;
         BOOL ok = WriteFile(h, bytes.data(), (DWORD)bytes.size(), &written, nullptr) && written == bytes.size();
         ok = CloseHandle(h) && ok;
         if (!ok || !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
             DeleteFileW(tmp.c_str());
-            error = "保存皮肤失败（磁盘已满或没有权限？）";
+            error = kurocat::uiText("保存皮肤失败（磁盘已满或没有权限？）", "Couldn't save the skin (disk full or no permission?)", "Falha ao salvar a skin (disco cheio ou sem permissão?)");
             return false;
         }
         idOut = spec.id;
@@ -218,12 +221,12 @@ struct SkinLibrary {
 
     bool rename(const std::string& id, const std::string& rawNewName, std::string& newIdOut, std::string& error) {
         if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) {
-            error = "无效的皮肤 ID";
+            error = kurocat::uiText("无效的皮肤 ID", "Invalid skin ID", "ID de skin inválido");
             return false;
         }
         std::string cleaned = skinparse::trimmedUtf8(rawNewName, 40);
         if (cleaned.empty()) {
-            error = "皮肤名称不能为空";
+            error = kurocat::uiText("皮肤名称不能为空", "Skin name cannot be empty", "O nome da skin não pode ficar vazio");
             return false;
         }
         std::wstring oldPath = dir() + L"\\" + utf8ToWide(id) + L".kurocat";
@@ -231,22 +234,22 @@ struct SkinLibrary {
         if (!readFile(oldPath, bytes, error)) return false;
         std::string updated;
         if (!replaceTopLevelName(bytes, cleaned, updated)) {
-            error = "无法定位皮肤 JSON 中的 name 字段";
+            error = kurocat::uiText("无法定位皮肤 JSON 中的 name 字段", "Couldn't find the name field in the skin JSON", "Não foi possível encontrar o campo name no JSON da skin");
             return false;
         }
         SkinSpec checkSpec;
         if (!SkinSpec::parse(updated, checkSpec, error)) return false;
-        if (!ensureDir()) { error = "无法访问皮肤文件夹"; return false; }
+        if (!ensureDir()) { error = kurocat::uiText("无法访问皮肤文件夹", "Couldn't access the skins folder", "Não foi possível acessar a pasta de skins"); return false; }
         std::wstring newPath = dir() + L"\\" + utf8ToWide(checkSpec.id) + L".kurocat";
         std::wstring tmp = newPath + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法写入皮肤文件"; return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = kurocat::uiText("无法写入皮肤文件", "Couldn't write the skin file", "Não foi possível gravar o arquivo de skin"); return false; }
         DWORD written = 0;
         BOOL ok = WriteFile(h, updated.data(), (DWORD)updated.size(), &written, nullptr) && written == updated.size();
         ok = CloseHandle(h) && ok;
         if (!ok || !MoveFileExW(tmp.c_str(), newPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
             DeleteFileW(tmp.c_str());
-            error = "保存重命名后的皮肤失败";
+            error = kurocat::uiText("保存重命名后的皮肤失败", "Couldn't save the renamed skin", "Falha ao salvar a skin renomeada");
             return false;
         }
         if (checkSpec.id != id) DeleteFileW(oldPath.c_str());
@@ -271,18 +274,20 @@ struct KeyboardSkinLibrary {
 
     static bool readFile(const std::wstring& path, std::string& bytes, std::string& error) {
         HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法打开这个文件"; return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = kurocat::uiText("无法打开这个文件", "Couldn't open this file", "Não foi possível abrir este arquivo"); return false; }
         LARGE_INTEGER size = {};
         if (!GetFileSizeEx(h, &size) || size.QuadPart > (LONGLONG)KeyboardSkinSpec::MaxFileBytes) {
             CloseHandle(h);
-            error = size.QuadPart > (LONGLONG)KeyboardSkinSpec::MaxFileBytes ? "键盘皮肤文件超过 256 KB 上限" : "无法读取这个文件";
+            error = size.QuadPart > (LONGLONG)KeyboardSkinSpec::MaxFileBytes
+                ? kurocat::uiText("键盘皮肤文件超过 256 KB 上限", "Keyboard skin file exceeds the 256 KB limit", "O arquivo de skin de teclado passa do limite de 256 KB")
+                : kurocat::uiText("无法读取这个文件", "Couldn't read this file", "Não foi possível ler este arquivo");
             return false;
         }
         bytes.assign((size_t)size.QuadPart, '\0');
         DWORD read = 0;
         BOOL ok = bytes.empty() || ReadFile(h, &bytes[0], (DWORD)bytes.size(), &read, nullptr);
         CloseHandle(h);
-        if (!ok || read != bytes.size()) { error = "无法读取这个文件"; return false; }
+        if (!ok || read != bytes.size()) { error = kurocat::uiText("无法读取这个文件", "Couldn't read this file", "Não foi possível ler este arquivo"); return false; }
         return true;
     }
 
@@ -343,17 +348,17 @@ struct KeyboardSkinLibrary {
         if (!readFile(path, bytes, error)) return false;
         KeyboardSkinSpec spec;
         if (!KeyboardSkinSpec::parse(bytes, spec, error)) return false;
-        if (!ensureDir()) { error = "无法创建键盘皮肤文件夹 %APPDATA%\\KuroCat\\keyboards"; return false; }
+        if (!ensureDir()) { error = kurocat::uiText("无法创建键盘皮肤文件夹 %APPDATA%\\KuroCat\\keyboards", "Couldn't create the keyboard skins folder %APPDATA%\\KuroCat\\keyboards", "Não foi possível criar a pasta de skins de teclado %APPDATA%\\KuroCat\\keyboards"); return false; }
         std::wstring target = directory() + L"\\" + utf8ToWide(spec.id) + L".kurokb";
         std::wstring tmp = target + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法写入键盘皮肤文件夹 %APPDATA%\\KuroCat\\keyboards"; return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = kurocat::uiText("无法写入键盘皮肤文件夹 %APPDATA%\\KuroCat\\keyboards", "Couldn't write to the keyboard skins folder %APPDATA%\\KuroCat\\keyboards", "Não foi possível gravar na pasta de skins de teclado %APPDATA%\\KuroCat\\keyboards"); return false; }
         DWORD written = 0;
         BOOL ok = WriteFile(h, bytes.data(), (DWORD)bytes.size(), &written, nullptr) && written == bytes.size();
         ok = CloseHandle(h) && ok;
         if (!ok || !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
             DeleteFileW(tmp.c_str());
-            error = "保存键盘皮肤失败（磁盘已满或没有权限？）";
+            error = kurocat::uiText("保存键盘皮肤失败（磁盘已满或没有权限？）", "Couldn't save the keyboard skin (disk full or no permission?)", "Falha ao salvar a skin de teclado (disco cheio ou sem permissão?)");
             return false;
         }
         idOut = spec.id;

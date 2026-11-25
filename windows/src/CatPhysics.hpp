@@ -9,6 +9,12 @@
 #include <algorithm>
 #include "KeyMap.hpp"
 #include "InputEngine.hpp"
+#include "../../shared/UiLanguage.hpp"
+
+// Picks the UI string for a language (kurocat::UiLanguage: 0 = Chinese, 1 = English, 2 = Portuguese).
+inline const wchar_t* uiTextW(int language, const wchar_t* zh, const wchar_t* en, const wchar_t* pt) {
+    return language == 1 ? en : (language == 2 ? pt : zh);
+}
 
 enum class CatCoatTheme : int {
     ClassicBlack = 0,
@@ -52,7 +58,8 @@ struct CatSettings {
     bool whiteOutline = true;
     bool enableAnger = true;
     bool enableDragAnimation = true;
-    bool isEnglish = false;
+    int language = 2; // kurocat::UiLanguage: 0 = Chinese, 1 = English, 2 = Brazilian Portuguese (default)
+    const wchar_t* tr(const wchar_t* zh, const wchar_t* en, const wchar_t* pt) const { return uiTextW(language, zh, en, pt); }
     bool isEditMode = false; // runtime-only interactive resize & rotate box
     bool petInteraction = true;
     bool fullClickThrough = false;
@@ -100,7 +107,16 @@ struct CatSettings {
         whiteOutline     = readDword(L"WhiteOutline", 1) != 0;
         enableAnger      = readDword(L"EnableAnger", 1) != 0;
         enableDragAnimation = readDword(L"EnableDragAnimation", 1) != 0;
-        isEnglish        = readDword(L"LanguageEnglish", 0) != 0;
+        {
+            // "Language" (0/1/2) supersedes the old zh/en "LanguageEnglish" flag. Older installs that
+            // had English keep English; everyone else moves to the new Portuguese default.
+            DWORD lang = 0, sz = sizeof(lang);
+            if (RegQueryValueExW(hKey, L"Language", nullptr, nullptr, (LPBYTE)&lang, &sz) == ERROR_SUCCESS && lang <= 2) {
+                language = (int)lang;
+            } else {
+                language = readDword(L"LanguageEnglish", 0) != 0 ? 1 : 2;
+            }
+        }
         petInteraction   = readDword(L"PetInteraction", 1) != 0;
         fullClickThrough = readDword(L"FullClickThrough", 0) != 0;
         alwaysOnTop      = readDword(L"AlwaysOnTop", 1) != 0;
@@ -178,7 +194,8 @@ struct CatSettings {
         writeDword(L"WhiteOutline", whiteOutline ? 1 : 0);
         writeDword(L"EnableAnger", enableAnger ? 1 : 0);
         writeDword(L"EnableDragAnimation", enableDragAnimation ? 1 : 0);
-        writeDword(L"LanguageEnglish", isEnglish ? 1 : 0);
+        writeDword(L"Language", (DWORD)std::clamp(language, 0, 2));
+        writeDword(L"LanguageEnglish", language == 1 ? 1 : 0); // kept for older builds
         writeDword(L"PetInteraction", petInteraction ? 1 : 0);
         writeDword(L"FullClickThrough", fullClickThrough ? 1 : 0);
         writeDword(L"AlwaysOnTop", alwaysOnTop ? 1 : 0);
@@ -574,9 +591,10 @@ public:
             pupilScale.target = 1.12f;
             earTwitch.velocity -= 2.2f;
             if (settings.showMouseBadges) {
-                std::wstring lbl = settings.isEnglish
-                    ? (button == 0 ? L"LMB" : (button == 1 ? L"RMB" : L"MMB"))
-                    : ((button == 0) ? L"\u5DE6\u952E" : (button == 1 ? L"\u53F3\u952E" : L"\u4E2D\u952E"));
+                std::wstring lbl = (button == 0)
+                    ? uiTextW(settings.language, L"\u5DE6\u952E", L"LMB", L"Esq")
+                    : (button == 1 ? uiTextW(settings.language, L"\u53F3\u952E", L"RMB", L"Dir")
+                                   : uiTextW(settings.language, L"\u4E2D\u952E", L"MMB", L"Meio"));
                 Pt pt = { MouseBaseCenter.x + mouseOffset.point().x, MouseBaseCenter.y + mouseOffset.point().y - 6.0f };
                 spawnFloatingKeycap(lbl, pt, now);
             }
