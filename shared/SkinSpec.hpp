@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "CoatPatterns.hpp"
+#include "UiLanguage.hpp"
 
 struct SkinColor {
     double r = 0, g = 0, b = 0, a = 1;
@@ -142,7 +143,7 @@ public:
         skipWs();
         if (!parseValue(out, 0)) { error = error_; return false; }
         skipWs();
-        if (p_ != end_) { fail("JSON 结尾有多余内容"); error = error_; return false; }
+        if (p_ != end_) { fail(kurocat::uiText("JSON 结尾有多余内容", "extra content after the end of the JSON", "conteúdo sobrando depois do fim do JSON")); error = error_; return false; }
         return true;
     }
 
@@ -153,19 +154,21 @@ private:
     std::string error_;
 
     bool fail(const char* what) {
-        if (error_.empty()) error_ = std::string("不是有效的 JSON：") + what + "（第 " + std::to_string(p_ - begin_ + 1) + " 字节附近）";
+        if (error_.empty()) error_ = std::string(kurocat::uiText("不是有效的 JSON：", "Invalid JSON: ", "JSON inválido: ")) + what
+            + kurocat::uiText("（第 ", " (near byte ", " (perto do byte ") + std::to_string(p_ - begin_ + 1)
+            + kurocat::uiText(" 字节附近）", ")", ")");
         return false;
     }
     void skipWs() { while (p_ < end_ && (*p_ == ' ' || *p_ == '\t' || *p_ == '\n' || *p_ == '\r')) ++p_; }
     bool literal(const char* word) {
         size_t n = std::strlen(word);
-        if ((size_t)(end_ - p_) < n || std::memcmp(p_, word, n) != 0) return fail("无法识别的值");
+        if ((size_t)(end_ - p_) < n || std::memcmp(p_, word, n) != 0) return fail(kurocat::uiText("无法识别的值", "unrecognized value", "valor não reconhecido"));
         p_ += n;
         return true;
     }
     bool parseValue(Value& v, int depth) {
-        if (depth > 24) return fail("嵌套层级过深");
-        if (p_ >= end_) return fail("内容意外结束");
+        if (depth > 24) return fail(kurocat::uiText("嵌套层级过深", "nesting is too deep", "aninhamento profundo demais"));
+        if (p_ >= end_) return fail(kurocat::uiText("内容意外结束", "unexpected end of content", "o conteúdo terminou antes do esperado"));
         char c = *p_;
         if (c == '{') return parseObject(v, depth);
         if (c == '[') return parseArray(v, depth);
@@ -174,7 +177,7 @@ private:
         if (c == 'f') { v.type = Value::JBool; v.b = false; return literal("false"); }
         if (c == 'n') { v.type = Value::JNull; return literal("null"); }
         if (c == '-' || (c >= '0' && c <= '9')) { v.type = Value::JNumber; return parseNumber(v.n); }
-        return fail("无法识别的值");
+        return fail(kurocat::uiText("无法识别的值", "unrecognized value", "valor não reconhecido"));
     }
     bool parseObject(Value& v, int depth) {
         v.type = Value::JObject;
@@ -182,11 +185,11 @@ private:
         if (p_ < end_ && *p_ == '}') { ++p_; return true; }
         while (true) {
             skipWs();
-            if (p_ >= end_ || *p_ != '"') return fail("对象的键必须是字符串");
+            if (p_ >= end_ || *p_ != '"') return fail(kurocat::uiText("对象的键必须是字符串", "object keys must be strings", "as chaves de um objeto precisam ser textos"));
             std::string key;
             if (!parseString(key)) return false;
             skipWs();
-            if (p_ >= end_ || *p_ != ':') return fail("缺少冒号");
+            if (p_ >= end_ || *p_ != ':') return fail(kurocat::uiText("缺少冒号", "missing colon", "faltam dois-pontos"));
             ++p_; skipWs();
             v.keys.push_back(std::move(key));
             v.items.emplace_back();
@@ -194,7 +197,7 @@ private:
             skipWs();
             if (p_ < end_ && *p_ == ',') { ++p_; continue; }
             if (p_ < end_ && *p_ == '}') { ++p_; return true; }
-            return fail("对象缺少逗号或右花括号");
+            return fail(kurocat::uiText("对象缺少逗号或右花括号", "object is missing a comma or closing brace", "falta uma vírgula ou a chave de fechamento no objeto"));
         }
     }
     bool parseArray(Value& v, int depth) {
@@ -208,7 +211,7 @@ private:
             skipWs();
             if (p_ < end_ && *p_ == ',') { ++p_; continue; }
             if (p_ < end_ && *p_ == ']') { ++p_; return true; }
-            return fail("数组缺少逗号或右方括号");
+            return fail(kurocat::uiText("数组缺少逗号或右方括号", "array is missing a comma or closing bracket", "falta uma vírgula ou o colchete de fechamento na lista"));
         }
     }
     static void putUtf8(std::string& s, uint32_t cp) {
@@ -218,7 +221,7 @@ private:
         else { s += (char)(0xF0 | (cp >> 18)); s += (char)(0x80 | ((cp >> 12) & 63)); s += (char)(0x80 | ((cp >> 6) & 63)); s += (char)(0x80 | (cp & 63)); }
     }
     bool hex4(uint32_t& out) {
-        if (end_ - p_ < 4) return fail("\\u 转义不完整");
+        if (end_ - p_ < 4) return fail(kurocat::uiText("\\u 转义不完整", "incomplete \\u escape", "escape \\u incompleto"));
         out = 0;
         for (int i = 0; i < 4; ++i) {
             char c = *p_++;
@@ -226,31 +229,31 @@ private:
             if (c >= '0' && c <= '9') out |= (uint32_t)(c - '0');
             else if (c >= 'a' && c <= 'f') out |= (uint32_t)(c - 'a' + 10);
             else if (c >= 'A' && c <= 'F') out |= (uint32_t)(c - 'A' + 10);
-            else return fail("\\u 转义含非十六进制字符");
+            else return fail(kurocat::uiText("\\u 转义含非十六进制字符", "\\u escape has non-hex characters", "escape \\u com caracteres não hexadecimais"));
         }
         return true;
     }
     bool parseString(std::string& s) {
         ++p_; // opening quote
         while (true) {
-            if (p_ >= end_) return fail("字符串没有结束引号");
+            if (p_ >= end_) return fail(kurocat::uiText("字符串没有结束引号", "string has no closing quote", "texto sem aspas de fechamento"));
             unsigned char c = (unsigned char)*p_++;
             if (c == '"') break;
-            if (c < 0x20) return fail("字符串里有未转义的控制字符");
+            if (c < 0x20) return fail(kurocat::uiText("字符串里有未转义的控制字符", "string contains an unescaped control character", "o texto tem um caractere de controle sem escape"));
             if (c != '\\') {
                 if (c < 0x80) { s += (char)c; continue; }
                 // Validate one UTF-8 sequence.
                 int extra = (c >= 0xF0 && c <= 0xF4) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC2 && c <= 0xDF) ? 1 : -1;
-                if (extra < 0 || end_ - p_ < extra) return fail("字符串不是有效的 UTF-8");
+                if (extra < 0 || end_ - p_ < extra) return fail(kurocat::uiText("字符串不是有效的 UTF-8", "string is not valid UTF-8", "o texto não é UTF-8 válido"));
                 s += (char)c;
                 for (int i = 0; i < extra; ++i) {
                     unsigned char d = (unsigned char)*p_++;
-                    if ((d & 0xC0) != 0x80) return fail("字符串不是有效的 UTF-8");
+                    if ((d & 0xC0) != 0x80) return fail(kurocat::uiText("字符串不是有效的 UTF-8", "string is not valid UTF-8", "o texto não é UTF-8 válido"));
                     s += (char)d;
                 }
                 continue;
             }
-            if (p_ >= end_) return fail("转义不完整");
+            if (p_ >= end_) return fail(kurocat::uiText("转义不完整", "incomplete escape", "escape incompleto"));
             char e = *p_++;
             switch (e) {
                 case '"': s += '"'; break;
@@ -266,15 +269,15 @@ private:
                     if (!hex4(cp)) return false;
                     if (cp >= 0xD800 && cp <= 0xDBFF) {
                         uint32_t lo;
-                        if (end_ - p_ < 2 || p_[0] != '\\' || p_[1] != 'u') return fail("UTF-16 代理对不完整");
+                        if (end_ - p_ < 2 || p_[0] != '\\' || p_[1] != 'u') return fail(kurocat::uiText("UTF-16 代理对不完整", "incomplete UTF-16 surrogate pair", "par substituto UTF-16 incompleto"));
                         p_ += 2;
-                        if (!hex4(lo) || lo < 0xDC00 || lo > 0xDFFF) return fail("UTF-16 代理对无效");
+                        if (!hex4(lo) || lo < 0xDC00 || lo > 0xDFFF) return fail(kurocat::uiText("UTF-16 代理对无效", "invalid UTF-16 surrogate pair", "par substituto UTF-16 inválido"));
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) return fail("UTF-16 代理对无效");
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) return fail(kurocat::uiText("UTF-16 代理对无效", "invalid UTF-16 surrogate pair", "par substituto UTF-16 inválido"));
                     putUtf8(s, cp);
                     break;
                 }
-                default: return fail("未知的转义字符");
+                default: return fail(kurocat::uiText("未知的转义字符", "unknown escape character", "caractere de escape desconhecido"));
             }
         }
         return true;
@@ -283,7 +286,7 @@ private:
         const char* start = p_;
         bool neg = false;
         if (*p_ == '-') { neg = true; ++p_; }
-        if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail("数字格式错误");
+        if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail(kurocat::uiText("数字格式错误", "malformed number", "número mal formatado"));
         long double mant = 0;
         int digits = 0, exp10 = 0;
         if (*p_ == '0') { ++p_; }
@@ -293,7 +296,7 @@ private:
         }
         if (p_ < end_ && *p_ == '.') {
             ++p_;
-            if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail("数字格式错误");
+            if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail(kurocat::uiText("数字格式错误", "malformed number", "número mal formatado"));
             while (p_ < end_ && *p_ >= '0' && *p_ <= '9') {
                 if (digits < 19) { mant = mant * 10 + (*p_ - '0'); ++digits; --exp10; }
                 ++p_;
@@ -303,16 +306,16 @@ private:
             ++p_;
             bool eneg = false;
             if (p_ < end_ && (*p_ == '+' || *p_ == '-')) { eneg = (*p_ == '-'); ++p_; }
-            if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail("数字格式错误");
+            if (p_ >= end_ || !(*p_ >= '0' && *p_ <= '9')) return fail(kurocat::uiText("数字格式错误", "malformed number", "número mal formatado"));
             int e = 0;
             while (p_ < end_ && *p_ >= '0' && *p_ <= '9') { if (e < 10000) e = e * 10 + (*p_ - '0'); ++p_; }
             exp10 += eneg ? -e : e;
         }
-        if (p_ - start > 64) return fail("数字过长");
+        if (p_ - start > 64) return fail(kurocat::uiText("数字过长", "number is too long", "número longo demais"));
         long double v = mant;
         if (mant != 0) v = (exp10 > 400) ? HUGE_VALL : (exp10 < -400 ? 0.0L : mant * std::pow(10.0L, (long double)exp10));
         out = (double)(neg ? -v : v);
-        if (!std::isfinite(out)) return fail("数字超出范围");
+        if (!std::isfinite(out)) return fail(kurocat::uiText("数字超出范围", "number is out of range", "número fora do intervalo"));
         return true;
     }
 };
@@ -370,21 +373,21 @@ inline float clampf(double v, double lo, double hi) { return (float)std::min(hi,
 
 inline bool number(Ctx& c, const Value* v, const std::string& field, double lo, double hi, float& out) {
     if (!v || v->type == Value::JNull) return true; // keep default
-    if (v->type != Value::JNumber) return c.fail(field + " 必须是数字");
+    if (v->type != Value::JNumber) return c.fail(field + kurocat::uiText(" 必须是数字", " must be a number", " precisa ser um número"));
     out = clampf(v->n, lo, hi);
     return true;
 }
 
 inline bool color(Ctx& c, const Value* v, const std::string& field, SkinColor& out) {
     if (!v || v->type == Value::JNull) return true;
-    if (v->type != Value::JString) return c.fail(field + " 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串");
+    if (v->type != Value::JString) return c.fail(field + kurocat::uiText(" 必须是 \"#RRGGBB\" 或 \"#RRGGBBAA\" 颜色字符串", " must be a \"#RRGGBB\" or \"#RRGGBBAA\" color string", " precisa ser uma cor no formato \"#RRGGBB\" ou \"#RRGGBBAA\""));
     const std::string& s = v->s;
-    if ((s.size() != 7 && s.size() != 9) || s[0] != '#') return c.fail(field + " 颜色格式应为 #RRGGBB 或 #RRGGBBAA，现在是 \"" + s.substr(0, 16) + "\"");
+    if ((s.size() != 7 && s.size() != 9) || s[0] != '#') return c.fail(field + kurocat::uiText(" 颜色格式应为 #RRGGBB 或 #RRGGBBAA，现在是 \"", " color must be #RRGGBB or #RRGGBBAA, got \"", ": a cor deve estar no formato #RRGGBB ou #RRGGBBAA, mas veio \"") + s.substr(0, 16) + "\"");
     unsigned int vals[4] = {0, 0, 0, 255};
     for (size_t i = 1; i < s.size(); ++i) {
         char ch = s[i];
         int d = (ch >= '0' && ch <= '9') ? ch - '0' : (ch >= 'a' && ch <= 'f') ? ch - 'a' + 10 : (ch >= 'A' && ch <= 'F') ? ch - 'A' + 10 : -1;
-        if (d < 0) return c.fail(field + " 颜色里有非十六进制字符：\"" + s + "\"");
+        if (d < 0) return c.fail(field + kurocat::uiText(" 颜色里有非十六进制字符：\"", " color has non-hex characters: \"", ": a cor tem caracteres que não são hexadecimais: \"") + s + "\"");
         size_t k = (i - 1) / 2;
         if ((i - 1) % 2 == 0) vals[k] = 0;
         vals[k] = vals[k] * 16 + (unsigned)d;
@@ -397,7 +400,7 @@ inline bool color(Ctx& c, const Value* v, const std::string& field, SkinColor& o
 // so newer Workshop skins remain forward-compatible instead of failing import.
 inline bool space(Ctx& c, const Value* v, const std::string& field, SkinSpace& out, bool& recognized) {
     static const char* names[] = {"head", "skull", "body", "tail", "leftEar", "rightEar", "leftArm", "rightArm", "hindLeg"};
-    if (!v || v->type != Value::JString || v->s.empty()) return c.fail(field + " 缺失：必须是 head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg 之一");
+    if (!v || v->type != Value::JString || v->s.empty()) return c.fail(field + kurocat::uiText(" 缺失：必须是 head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg 之一", " missing: must be one of head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg", " ausente: precisa ser head / skull / body / tail / leftEar / rightEar / leftArm / rightArm / hindLeg"));
     for (int i = 0; i < 9; ++i) if (v->s == names[i]) { out = (SkinSpace)i; recognized = true; return true; }
     recognized = false;
     return true;
@@ -429,34 +432,34 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     using namespace skinparse;
     using skinjson::Value;
     Ctx c;
-    if (bytes.size() > MaxFileBytes) { error = "皮肤文件超过 2 MB 上限"; return false; }
-    if (bytes.empty()) { error = "皮肤文件是空的"; return false; }
+    if (bytes.size() > MaxFileBytes) { error = kurocat::uiText("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB"); return false; }
+    if (bytes.empty()) { error = kurocat::uiText("皮肤文件是空的", "The skin file is empty", "O arquivo de skin está vazio"); return false; }
     Value root;
     {
         skinjson::Parser parser(bytes);
         if (!parser.parseDocument(root, error)) return false;
     }
-    if (root.type != Value::JObject) { error = "皮肤文件最外层必须是 JSON 对象 { … }"; return false; }
+    if (root.type != Value::JObject) { error = kurocat::uiText("皮肤文件最外层必须是 JSON 对象 { … }", "The top level of a skin file must be a JSON object { … }", "O nível mais externo do arquivo de skin precisa ser um objeto JSON { … }"); return false; }
 
     const Value* ver = root.get("formatVersion");
-    if (!ver) { error = "缺少 formatVersion，这不是 KuroCat 皮肤文件"; return false; }
-    if (ver->type != Value::JNumber || ver->n != std::floor(ver->n)) { error = "formatVersion 必须是整数"; return false; }
-    if (ver->n > FormatVersion) { error = "这个皮肤使用了更新的格式（formatVersion " + std::to_string((long long)ver->n) + "），请先升级 KuroCat"; return false; }
-    if (ver->n < 1) { error = "formatVersion 无效"; return false; }
+    if (!ver) { error = kurocat::uiText("缺少 formatVersion，这不是 KuroCat 皮肤文件", "Missing formatVersion — this is not a KuroCat skin file", "Falta formatVersion — este não é um arquivo de skin do KuroCat"); return false; }
+    if (ver->type != Value::JNumber || ver->n != std::floor(ver->n)) { error = kurocat::uiText("formatVersion 必须是整数", "formatVersion must be an integer", "formatVersion precisa ser um número inteiro"); return false; }
+    if (ver->n > FormatVersion) { error = std::string(kurocat::uiText("这个皮肤使用了更新的格式（formatVersion ", "This skin uses a newer format (formatVersion ", "Esta skin usa um formato mais novo (formatVersion ")) + std::to_string((long long)ver->n) + kurocat::uiText("），请先升级 KuroCat", "); please update KuroCat first", "); atualize o KuroCat primeiro"); return false; }
+    if (ver->n < 1) { error = kurocat::uiText("formatVersion 无效", "Invalid formatVersion", "formatVersion inválido"); return false; }
 
     SkinSpec s;
     const Value* name = root.get("name");
-    if (!name || name->type != Value::JString) { error = "缺少皮肤名称 name"; return false; }
+    if (!name || name->type != Value::JString) { error = kurocat::uiText("缺少皮肤名称 name", "Missing skin name (name)", "Falta o nome da skin (name)"); return false; }
     s.name = trimmedUtf8(name->s, 40);
-    if (s.name.empty()) { error = "皮肤名称 name 不能为空"; return false; }
+    if (s.name.empty()) { error = kurocat::uiText("皮肤名称 name 不能为空", "Skin name (name) cannot be empty", "O nome da skin (name) não pode ficar vazio"); return false; }
     if (const Value* author = root.get("author")) {
         if (author->type == Value::JString) s.author = trimmedUtf8(author->s, 40);
-        else if (author->type != Value::JNull) { error = "author 必须是字符串"; return false; }
+        else if (author->type != Value::JNull) { error = kurocat::uiText("author 必须是字符串", "author must be a string", "author precisa ser um texto"); return false; }
     }
 
     // Palette
     const Value* pal = root.get("palette");
-    if (!pal || pal->type != Value::JObject) { error = "缺少调色板 palette"; return false; }
+    if (!pal || pal->type != Value::JObject) { error = kurocat::uiText("缺少调色板 palette", "Missing palette", "Falta a paleta (palette)"); return false; }
     struct Slot { const char* key; SkinColor SkinPalette::*member; };
     static const Slot slots[] = {
         {"body", &SkinPalette::body}, {"headBody", &SkinPalette::headBody}, {"bodyShade", &SkinPalette::bodyShade}, {"belly", &SkinPalette::belly},
@@ -471,7 +474,7 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     };
     for (const Slot& slot : slots)
         if (!color(c, pal->get(slot.key), std::string("palette.") + slot.key, s.palette.*slot.member)) { error = c.error; return false; }
-    if (!s.palette.body.set) { error = "调色板缺少主体颜色 palette.body"; return false; }
+    if (!s.palette.body.set) { error = kurocat::uiText("调色板缺少主体颜色 palette.body", "Palette is missing the body color palette.body", "A paleta não tem a cor do corpo (palette.body)"); return false; }
     // Defaults derived from the base colours (documented in docs/skin-format.md).
     SkinPalette& p = s.palette;
     if (!p.legs.set) p.legs = p.body;
@@ -487,9 +490,9 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
 
     // Shape
     if (const Value* sh = root.get("shape")) {
-        if (sh->type != Value::JObject) { error = "shape 必须是对象"; return false; }
+        if (sh->type != Value::JObject) { error = kurocat::uiText("shape 必须是对象", "shape must be an object", "shape precisa ser um objeto"); return false; }
         if (const Value* b = sh->get("build")) {
-            if (b->type != Value::JString || (b->s != "standard" && b->s != "sleek")) { error = "shape.build 必须是 \"standard\" 或 \"sleek\""; return false; }
+            if (b->type != Value::JString || (b->s != "standard" && b->s != "sleek")) { error = kurocat::uiText("shape.build 必须是 \"standard\" 或 \"sleek\"", "shape.build must be \"standard\" or \"sleek\"", "shape.build precisa ser \"standard\" ou \"sleek\""); return false; }
             s.shape.build = b->s == "sleek" ? SkinBuild::Sleek : SkinBuild::Standard;
         }
         SkinShape& h = s.shape;
@@ -530,12 +533,12 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
         }
     }
     if (const Value* hs = root.get("headSurface")) {
-        if (hs->type != Value::JString || (hs->s != "dome" && hs->s != "plane")) { error = "headSurface 必须是 \"dome\" 或 \"plane\""; return false; }
+        if (hs->type != Value::JString || (hs->s != "dome" && hs->s != "plane")) { error = kurocat::uiText("headSurface 必须是 \"dome\" 或 \"plane\"", "headSurface must be \"dome\" or \"plane\"", "headSurface precisa ser \"dome\" ou \"plane\""); return false; }
         s.headSurface = hs->s == "plane" ? SkinHeadSurface::Plane : SkinHeadSurface::Dome;
     }
 
     if (const Value* il = root.get("idleLegs")) {
-        if (il->type != Value::JString || (il->s != "legs" && il->s != "chest")) { error = "idleLegs 必须是 \"legs\" 或 \"chest\""; return false; }
+        if (il->type != Value::JString || (il->s != "legs" && il->s != "chest")) { error = kurocat::uiText("idleLegs 必须是 \"legs\" 或 \"chest\"", "idleLegs must be \"legs\" or \"chest\"", "idleLegs precisa ser \"legs\" ou \"chest\""); return false; }
         s.idleLegsTinted = il->s == "legs";
     }
     if (const Value* rs = root.get("renderStyle"); rs && rs->type == Value::JString) {
@@ -548,32 +551,32 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
 
     // Regions (pen-tool curve areas)
     if (const Value* regs = root.get("regions")) {
-        if (regs->type != Value::JArray) { error = "regions 必须是数组"; return false; }
-        if (regs->items.size() > 64) { error = "regions 最多 64 个分区"; return false; }
+        if (regs->type != Value::JArray) { error = kurocat::uiText("regions 必须是数组", "regions must be an array", "regions precisa ser uma lista"); return false; }
+        if (regs->items.size() > 64) { error = kurocat::uiText("regions 最多 64 个分区", "regions allows at most 64 entries", "regions aceita no máximo 64 áreas"); return false; }
         for (size_t i = 0; i < regs->items.size(); ++i) {
             const Value& r = regs->items[i];
             std::string f = "regions[" + std::to_string(i) + "]";
-            if (r.type != Value::JObject) { error = f + " 必须是对象"; return false; }
+            if (r.type != Value::JObject) { error = f + kurocat::uiText(" 必须是对象", " must be an object", " precisa ser um objeto"); return false; }
             SkinRegion reg;
             bool knownSpace = false;
             if (!space(c, r.get("space"), f + ".space", reg.space, knownSpace)) { error = c.error; return false; }
             if (!knownSpace) continue;
             const Value* fill = r.get("fill");
-            if (!fill || fill->type == Value::JNull) { error = f + ".fill 缺失"; return false; }
+            if (!fill || fill->type == Value::JNull) { error = f + kurocat::uiText(".fill 缺失", ".fill is missing", ".fill ausente"); return false; }
             if (!color(c, fill, f + ".fill", reg.fill)) { error = c.error; return false; }
             float alpha = 1;
             if (!number(c, r.get("alpha"), f + ".alpha", 0, 1, alpha)) { error = c.error; return false; }
             reg.fill.a *= alpha;
             const Value* anchors = r.get("anchors");
-            if (!anchors || anchors->type != Value::JArray) { error = f + ".anchors 必须是锚点数组"; return false; }
-            if (anchors->items.size() < 2 || anchors->items.size() > 128) { error = f + ".anchors 需要 2–128 个锚点"; return false; }
+            if (!anchors || anchors->type != Value::JArray) { error = f + kurocat::uiText(".anchors 必须是锚点数组", ".anchors must be an array of anchors", ".anchors precisa ser uma lista de âncoras"); return false; }
+            if (anchors->items.size() < 2 || anchors->items.size() > 128) { error = f + kurocat::uiText(".anchors 需要 2–128 个锚点", ".anchors needs 2–128 anchors", ".anchors precisa de 2 a 128 âncoras"); return false; }
             for (size_t k = 0; k < anchors->items.size(); ++k) {
                 const Value& a = anchors->items[k];
                 std::string af = f + ".anchors[" + std::to_string(k) + "]";
-                if (a.type != Value::JObject) { error = af + " 必须是 {x, y, inX, inY, outX, outY} 对象"; return false; }
+                if (a.type != Value::JObject) { error = af + kurocat::uiText(" 必须是 {x, y, inX, inY, outX, outY} 对象", " must be an {x, y, inX, inY, outX, outY} object", " precisa ser um objeto {x, y, inX, inY, outX, outY}"); return false; }
                 const Value* x = a.get("x");
                 const Value* y = a.get("y");
-                if (!x || !y) { error = af + " 缺少 x / y"; return false; }
+                if (!x || !y) { error = af + kurocat::uiText(" 缺少 x / y", " is missing x / y", ": faltam x / y"); return false; }
                 SkinBezierAnchor an;
                 if (!number(c, x, af + ".x", -400, 400, an.x) || !number(c, y, af + ".y", -400, 400, an.y)) { error = c.error; return false; }
                 an.inX = an.outX = an.x; an.inY = an.outY = an.y; // missing handles = sharp corner
@@ -592,22 +595,22 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
 
     // Marks (polygons / strokes, same model as the built-in CoatMark artwork)
     if (const Value* marks = root.get("marks")) {
-        if (marks->type != Value::JArray) { error = "marks 必须是数组"; return false; }
-        if (marks->items.size() > 256) { error = "marks 最多 256 条"; return false; }
+        if (marks->type != Value::JArray) { error = kurocat::uiText("marks 必须是数组", "marks must be an array", "marks precisa ser uma lista"); return false; }
+        if (marks->items.size() > 256) { error = kurocat::uiText("marks 最多 256 条", "marks allows at most 256 entries", "marks aceita no máximo 256 itens"); return false; }
         for (size_t i = 0; i < marks->items.size(); ++i) {
             const Value& m = marks->items[i];
             std::string f = "marks[" + std::to_string(i) + "]";
-            if (m.type != Value::JObject) { error = f + " 必须是对象"; return false; }
+            if (m.type != Value::JObject) { error = f + kurocat::uiText(" 必须是对象", " must be an object", " precisa ser um objeto"); return false; }
             SkinMark mark;
             bool knownSpace = false;
             if (!space(c, m.get("space"), f + ".space", mark.space, knownSpace)) { error = c.error; return false; }
             if (!knownSpace) continue;
             const Value* kind = m.get("kind");
-            if (!kind || kind->type != Value::JString || (kind->s != "polygon" && kind->s != "stroke")) { error = f + ".kind 必须是 \"polygon\" 或 \"stroke\""; return false; }
+            if (!kind || kind->type != Value::JString || (kind->s != "polygon" && kind->s != "stroke")) { error = f + kurocat::uiText(".kind 必须是 \"polygon\" 或 \"stroke\"", ".kind must be \"polygon\" or \"stroke\"", ".kind precisa ser \"polygon\" ou \"stroke\""); return false; }
             mark.stroke = kind->s == "stroke";
             if (!color(c, m.get("color"), f + ".color", mark.color)) { error = c.error; return false; }
             if (!mark.color.set) {
-                if (!s.palette.stripes.set) { error = f + ".color 缺失，且调色板没有 stripes 可作默认色"; return false; }
+                if (!s.palette.stripes.set) { error = f + kurocat::uiText(".color 缺失，且调色板没有 stripes 可作默认色", ".color is missing and the palette has no stripes color to fall back on", ".color ausente e a paleta não tem stripes para usar como cor padrão"); return false; }
                 mark.color = s.palette.stripes;
             }
             float alpha = 1;
@@ -616,13 +619,13 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
             mark.width = mark.stroke ? 2.0f : 0.0f;
             if (mark.stroke && !number(c, m.get("width"), f + ".width", 0.2, 24, mark.width)) { error = c.error; return false; }
             const Value* pts = m.get("points");
-            if (!pts || pts->type != Value::JArray) { error = f + ".points 必须是 [[x, y], …] 数组"; return false; }
+            if (!pts || pts->type != Value::JArray) { error = f + kurocat::uiText(".points 必须是 [[x, y], …] 数组", ".points must be a [[x, y], …] array", ".points precisa ser uma lista [[x, y], …]"); return false; }
             size_t minPts = mark.stroke ? 2 : 3;
-            if (pts->items.size() < minPts || pts->items.size() > 512) { error = f + ".points 需要 " + std::to_string(minPts) + "–512 个点"; return false; }
+            if (pts->items.size() < minPts || pts->items.size() > 512) { error = f + kurocat::uiText(".points 需要 ", ".points needs ", ".points precisa de ") + std::to_string(minPts) + kurocat::uiText("–512 个点", "–512 points", " a 512 pontos"); return false; }
             for (size_t k = 0; k < pts->items.size(); ++k) {
                 const Value& pt = pts->items[k];
                 if (pt.type != Value::JArray || pt.items.size() != 2 || pt.items[0].type != Value::JNumber || pt.items[1].type != Value::JNumber) {
-                    error = f + ".points[" + std::to_string(k) + "] 必须是 [x, y]"; return false;
+                    error = f + ".points[" + std::to_string(k) + kurocat::uiText("] 必须是 [x, y]", "] must be [x, y]", "] precisa ser [x, y]"); return false;
                 }
                 mark.points.push_back({clampf(pt.items[0].n, -400, 400), clampf(pt.items[1].n, -400, 400)});
             }
@@ -633,23 +636,23 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
 
     // Decorations (anchored PNG stickers)
     if (const Value* decos = root.get("decorations")) {
-        if (decos->type != Value::JArray) { error = "decorations 必须是数组"; return false; }
-        if (decos->items.size() > 8) { error = "decorations 最多 8 个贴纸"; return false; }
+        if (decos->type != Value::JArray) { error = kurocat::uiText("decorations 必须是数组", "decorations must be an array", "decorations precisa ser uma lista"); return false; }
+        if (decos->items.size() > 8) { error = kurocat::uiText("decorations 最多 8 个贴纸", "decorations allows at most 8 stickers", "decorations aceita no máximo 8 adesivos"); return false; }
         for (size_t i = 0; i < decos->items.size(); ++i) {
             const Value& d = decos->items[i];
             std::string f = "decorations[" + std::to_string(i) + "]";
-            if (d.type != Value::JObject) { error = f + " 必须是对象"; return false; }
+            if (d.type != Value::JObject) { error = f + kurocat::uiText(" 必须是对象", " must be an object", " precisa ser um objeto"); return false; }
             SkinDecoration deco;
             const Value* png = d.get("png");
-            if (!png || png->type != Value::JString || !skinjson::base64Decode(png->s, deco.png)) { error = f + ".png 必须是 base64 编码的 PNG"; return false; }
-            if (deco.png.size() > 1024 * 1024) { error = f + ".png 超过 1 MB"; return false; }
+            if (!png || png->type != Value::JString || !skinjson::base64Decode(png->s, deco.png)) { error = f + kurocat::uiText(".png 必须是 base64 编码的 PNG", ".png must be a base64-encoded PNG", ".png precisa ser um PNG em base64"); return false; }
+            if (deco.png.size() > 1024 * 1024) { error = f + kurocat::uiText(".png 超过 1 MB", ".png exceeds 1 MB", ".png passa de 1 MB"); return false; }
             if (!skinjson::pngSize(deco.png, deco.pixelWidth, deco.pixelHeight) || deco.pixelWidth > 1024 || deco.pixelHeight > 1024) {
-                error = f + ".png 不是有效的 PNG（或尺寸超过 1024×1024）"; return false;
+                error = f + kurocat::uiText(".png 不是有效的 PNG（或尺寸超过 1024×1024）", ".png is not a valid PNG (or is larger than 1024×1024)", ".png não é um PNG válido (ou passa de 1024×1024)"); return false;
             }
             const Value* anchor = d.get("anchor");
             static const char* anchors[] = {"headTop", "face", "neck", "tailTip"};
             if (!anchor || anchor->type != Value::JString || anchor->s.empty()) {
-                error = f + ".anchor 必须是 headTop / face / neck / tailTip 之一"; return false;
+                error = f + kurocat::uiText(".anchor 必须是 headTop / face / neck / tailTip 之一", ".anchor must be one of headTop / face / neck / tailTip", ".anchor precisa ser headTop / face / neck / tailTip"); return false;
             }
             bool ok = false;
             for (int k = 0; k < 4; ++k) if (anchor->s == anchors[k]) { deco.anchor = (SkinAnchorPoint)k; ok = true; }
@@ -664,9 +667,9 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
         if (prev->type == Value::JString) {
             int w = 0, h = 0;
             if (!skinjson::base64Decode(prev->s, s.preview) || !skinjson::pngSize(s.preview, w, h) || s.preview.size() > 512 * 1024) {
-                error = "preview 必须是不超过 512 KB 的 base64 PNG"; return false;
+                error = kurocat::uiText("preview 必须是不超过 512 KB 的 base64 PNG", "preview must be a base64 PNG of at most 512 KB", "preview precisa ser um PNG em base64 de até 512 KB"); return false;
             }
-        } else if (prev->type != Value::JNull) { error = "preview 必须是 base64 PNG 字符串"; return false; }
+        } else if (prev->type != Value::JNull) { error = kurocat::uiText("preview 必须是 base64 PNG 字符串", "preview must be a base64 PNG string", "preview precisa ser um texto PNG em base64"); return false; }
     }
 
     s.id = contentId(bytes);
@@ -676,13 +679,13 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
 
 inline bool SkinSpec::loadFile(const std::string& path, SkinSpec& out, std::string& error) {
     FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) { error = "无法打开文件"; return false; }
+    if (!f) { error = kurocat::uiText("无法打开文件", "Couldn't open the file", "Não foi possível abrir o arquivo"); return false; }
     std::string bytes;
     char buf[65536];
     size_t n;
     while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
         bytes.append(buf, n);
-        if (bytes.size() > MaxFileBytes) { std::fclose(f); error = "皮肤文件超过 2 MB 上限"; return false; }
+        if (bytes.size() > MaxFileBytes) { std::fclose(f); error = kurocat::uiText("皮肤文件超过 2 MB 上限", "Skin file exceeds the 2 MB limit", "O arquivo de skin passa do limite de 2 MB"); return false; }
     }
     std::fclose(f);
     return parse(bytes, out, error);
