@@ -22,7 +22,7 @@ for name,source in sources:
  (out/(name+'.swift')).write_text(source)
 PY
 swiftc -module-cache-path "$CHECK_DIR/cache" \
- "$CHECK_DIR/BaselinePatterns.swift" "$ROOT/Sources/KeyMap.swift" "$ROOT/Sources/InputEngine.swift" "$ROOT/Sources/CoatPatterns.swift" \
+ "$CHECK_DIR/BaselinePatterns.swift" "$ROOT/Sources/KeyMap.swift" "$ROOT/Sources/InputEngine.swift" "$ROOT/Sources/CoatPatterns.swift" "$ROOT/Sources/BeagleAtlas.swift" \
  "$CHECK_DIR/CatPhysics.swift" "$CHECK_DIR/LegacyRenderer.swift" "$CHECK_DIR/CurrentRenderer.swift" \
  "$ROOT/tests/skins/main.swift" -o "$CHECK_DIR/check" \
  -framework AppKit -framework CoreGraphics -framework QuartzCore -framework IOKit -framework ApplicationServices

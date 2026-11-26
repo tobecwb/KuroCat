@@ -242,7 +242,7 @@ private struct RenderedPose {
 }
 
 final class CatCanvasView: NSView {
-    private static let fgColorSpace = CGColorSpaceCreateDeviceRGB()
+    private static let fgColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
     private enum ActiveCursor { case arrow, openHand, pointingHand, crosshair, closedHand }
 
     let physics = CatPhysics()
@@ -258,6 +258,8 @@ final class CatCanvasView: NSView {
 
     private var lastHoverCanvasPt: CGPoint?
     private var isDragging = false
+    private var pendingDoubleClickToggle = false
+    private var doubleClickDownScreenPt: CGPoint = .zero
     private var isRotating = false
     private var rotateStartMouseAngle: CGFloat = 0
     private var rotateStartDeg: CGFloat = 0
@@ -282,6 +284,7 @@ final class CatCanvasView: NSView {
     private let toastHold: Double = 4.2
     private let toastFadeOut: Double = 0.4
     var toastActive: Bool { toastText != nil }
+    var forceClickThroughForModal = false
 
     var isDraggingOrResizing: Bool { isDragging || isRotating || activeResizeCorner >= 0 }
 
@@ -406,6 +409,13 @@ final class CatCanvasView: NSView {
     /// Updates smart click-through, cursor shape, and head petting strokes.
     func updateHoverAndClickThrough() {
         guard let win = window else { return }
+        if forceClickThroughForModal {
+            if !win.ignoresMouseEvents {
+                win.ignoresMouseEvents = true
+            }
+            setCursorIfNeeded(.arrow)
+            return
+        }
         if isDraggingOrResizing {
             if win.ignoresMouseEvents {
                 win.ignoresMouseEvents = false
@@ -504,6 +514,7 @@ final class CatCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onUserInteraction?()
+        pendingDoubleClickToggle = false
         guard let win = window else { return }
         let screenPt = NSEvent.mouseLocation
         let showPill = InputEngine.shared.status.needsAttention
@@ -553,10 +564,13 @@ final class CatCanvasView: NSView {
                 return
             }
 
-            // Double-clicking the cat toggles the clean resize & direction edit box!
+            // Double-clicking toggles the clean resize & direction edit box; if the user keeps
+            // holding and drags past 4pt on the second click, seamlessly start scruff-drag instead.
             if event.clickCount == 2 && (zone == .head || zone == .body || CatSettings.shared.isEditMode) {
-                CatSettings.shared.isEditMode.toggle()
-                needsDisplay = true
+                pendingDoubleClickToggle = true
+                doubleClickDownScreenPt = screenPt
+                dragStartScreenPt = screenPt
+                dragStartWindowOrigin = win.frame.origin
                 return
             }
         }
@@ -572,6 +586,16 @@ final class CatCanvasView: NSView {
         onUserInteraction?()
         guard let win = window else { return }
         let currentScreenPt = NSEvent.mouseLocation
+        if pendingDoubleClickToggle {
+            if hypot(currentScreenPt.x - doubleClickDownScreenPt.x, currentScreenPt.y - doubleClickDownScreenPt.y) >= 4.0 {
+                pendingDoubleClickToggle = false
+                isDragging = true
+                physics.setDragging(true, dragDx: 0)
+                setCursorIfNeeded(.closedHand)
+            } else {
+                return
+            }
+        }
         if isRotating {
             let center = CGPoint(x: win.frame.midX, y: win.frame.midY)
             let curAngle = atan2(-(currentScreenPt.y - center.y), currentScreenPt.x - center.x)
@@ -630,6 +654,12 @@ final class CatCanvasView: NSView {
     override func mouseUp(with event: NSEvent) {
         onUserInteraction?()
         guard let win = window else { return }
+        if pendingDoubleClickToggle {
+            pendingDoubleClickToggle = false
+            CatSettings.shared.isEditMode.toggle()
+            needsDisplay = true
+            return
+        }
         if isRotating {
             isRotating = false
             if !rotateDragged {
@@ -1188,11 +1218,21 @@ final class DressingRoomWindowController: NSWindowController {
 
     var isVisible: Bool { window?.isVisible ?? false }
 
+    func syncWindowLevel() {
+        guard let window else { return }
+        window.level = CatSettings.shared.fullScreenOverlay
+            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+            : .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
     func present() {
+        syncWindowLevel()
         refresh()
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 
     @objc private func chooseFile() {
@@ -1264,6 +1304,7 @@ final class SettingsWindowController: NSWindowController {
     private var fullscreenOverlaySwitch: NSSwitch!
     private var clickThroughSwitch: NSSwitch!
     private var autoHideSwitch: NSSwitch!
+    private var autoHeadphonesSwitch: NSSwitch!
     private var obsHideSwitch: NSSwitch!
     private var autoStartSwitch: NSSwitch!
     private var hourlySwitch: NSSwitch!
@@ -1300,11 +1341,21 @@ final class SettingsWindowController: NSWindowController {
         loc(zh, en, pt)
     }
 
+    func syncWindowLevel() {
+        guard let window else { return }
+        window.level = CatSettings.shared.fullScreenOverlay
+            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+            : .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
     func present() {
+        syncWindowLevel()
         rebuildUI()
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 
     func refresh() {
@@ -1637,7 +1688,7 @@ final class SettingsWindowController: NSWindowController {
 
         // MARK: Card 3 — Window & System
         addSectionHeader(tr("窗口与系统", "Window & System", "Janela e sistema"))
-        addCard(rows: 8) { card, rh in
+        addCard(rows: 9) { card, rh in
             // Row 0: Fullscreen topmost
             card.addSubview(makeLabel(tr("全屏游戏/应用置顶显示", "Always On Top Over Fullscreen", "Sempre visível sobre jogos/apps em tela cheia"), yPos: 4, width: 320))
             fullscreenOverlaySwitch = makeSwitch(s.fullScreenOverlay, action: #selector(onToggleFullscreenOverlay), yPos: 4)
@@ -1695,12 +1746,19 @@ final class SettingsWindowController: NSWindowController {
             card.addSubview(hourlySwitch)
             addRowDivider(card, yPos: r6 + rh)
 
-            // Row 7: Language
+            // Row 7: Auto Headphones on Music
             let r7 = 4 + rh * 7
-            card.addSubview(makeLabel("语言 / Language / Idioma", yPos: r7, width: 180))
+            card.addSubview(makeLabel(tr("听歌自动戴耳机（音乐/媒体播放器）", "Auto Headphones on Music", "Fones automáticos ao ouvir música"), yPos: r7, width: 340))
+            autoHeadphonesSwitch = makeSwitch(s.autoHeadphonesOnMusic, action: #selector(onToggleAutoHeadphones), yPos: r7)
+            card.addSubview(autoHeadphonesSwitch)
+            addRowDivider(card, yPos: r7 + rh)
+
+            // Row 8: Language
+            let r8 = 4 + rh * 8
+            card.addSubview(makeLabel("语言 / Language / Idioma", yPos: r8, width: 180))
             langSeg = NSSegmentedControl(labels: ["简体中文", "English", "Português"], trackingMode: .selectOne, target: self, action: #selector(onLangChanged))
             langSeg.selectedSegment = Self.languageCodes.firstIndex(of: s.language) ?? 0
-            langSeg.frame = NSRect(x: cardW - 14 - 246, y: r7 + 6, width: 246, height: 24)
+            langSeg.frame = NSRect(x: cardW - 14 - 246, y: r8 + 6, width: 246, height: 24)
             card.addSubview(langSeg)
         }
 
@@ -1908,6 +1966,10 @@ final class SettingsWindowController: NSWindowController {
     @objc private func onToggleAutoHide() {
         CatSettings.shared.autoHideFullscreen = (autoHideSwitch.state == .on)
         onAutoHideChanged?()
+    }
+
+    @objc private func onToggleAutoHeadphones() {
+        CatSettings.shared.autoHeadphonesOnMusic = (autoHeadphonesSwitch.state == .on)
     }
 
     @objc private func onOBSSelected() {

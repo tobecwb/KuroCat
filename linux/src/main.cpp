@@ -38,7 +38,7 @@ static inline const char* tr(const char* zh, const char* en, const char* pt) { r
 #include <fcntl.h>
 #include <glib-unix.h>
 
-#define KUROCAT_VERSION_STR "1.4.7"
+#define KUROCAT_VERSION_STR "1.5.1"
 static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
@@ -74,10 +74,12 @@ struct LinuxApp {
 
     GtkWidget* settingsWindow = nullptr;
     GtkWidget* setCoatCombo = nullptr;
+    GtkWidget* setDeleteSkinBtn = nullptr;
     GtkWidget* setSkinsDirLabel = nullptr;
     GtkWidget* setResetSkinsDirBtn = nullptr;
     GtkWidget* setEyeCombo = nullptr;
     GtkWidget* setKbCombo = nullptr;
+    GtkWidget* setDeleteKbBtn = nullptr;
     GtkWidget* setScaleSlider = nullptr;
     GtkWidget* setScaleLabel = nullptr;
     GtkWidget* setRotSlider = nullptr;
@@ -96,6 +98,7 @@ struct LinuxApp {
     GtkWidget* setTabletCombo = nullptr;
     GtkWidget* setTopmostChk = nullptr;
     GtkWidget* setAutohideChk = nullptr;
+    GtkWidget* setAutoHeadphonesChk = nullptr;
     GtkWidget* setClickThroughChk = nullptr;
     GtkWidget* setAutostartChk = nullptr;
     GtkWidget* setHighFpsChk = nullptr;
@@ -651,20 +654,31 @@ static void startInAppUpdate();
             if (g_app && r->ok && r->hasUpdate) {
                 g_app->availableUpdateVersion = r->latestTag;
                 g_app->availableUpdateUrl = r->releaseUrl;
+                if (!r->manual && g_app->settings.suppressAutoUpdatePrompt) {
+                    delete r;
+                    return G_SOURCE_REMOVE;
+                }
                 std::string head = std::string(tr("发现 KuroCat 新版本 ", "New KuroCat version available: ",
                                                   "Nova versão do KuroCat disponível: ")) + r->latestTag;
                 std::string body = std::string(tr("当前版本：v", "Current version: v", "Versão atual: v")) + APP_VERSION
                     + tr("\n最新版本：", "\nLatest version: ", "\nVersão mais recente: ") + r->latestTag
-                    + tr("\n\n是否立即在软件内自动下载并更新重启？",
-                         "\n\nDownload and install the update now, then restart?",
-                         "\n\nBaixar e instalar a atualização agora e reiniciar?");
+                    + tr("\n\n点击「立即更新」将在后台自动下载并重启。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在右键菜单点击「检查更新」）。",
+                         "\n\n\"Update Now\" downloads in the background and restarts.\n\"Not Now\" stops automatic reminders (you can still use Check for Updates in the right-click menu).",
+                         "\n\n\"Atualizar agora\" baixa em segundo plano e reinicia.\n\"Agora não\" desativa os lembretes automáticos (Verificar atualizações continua no menu do botão direito).");
                 GtkWidget* dlg = gtk_message_dialog_new(
-                    nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_YES_NO, "%s", head.c_str());
+                    nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_NONE, "%s", head.c_str());
                 gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dlg), "%s", body.c_str());
+                gtk_dialog_add_button(GTK_DIALOG(dlg), tr("立即更新", "Update Now", "Atualizar agora"), GTK_RESPONSE_YES);
+                gtk_dialog_add_button(GTK_DIALOG(dlg), tr("暂不更新", "Not Now", "Agora não"), GTK_RESPONSE_NO);
                 int resp = gtk_dialog_run(GTK_DIALOG(dlg));
                 gtk_widget_destroy(dlg);
                 if (resp == GTK_RESPONSE_YES) {
+                    g_app->settings.suppressAutoUpdatePrompt = false;
+                    g_app->settings.save();
                     startInAppUpdate();
+                } else {
+                    g_app->settings.suppressAutoUpdatePrompt = true;
+                    g_app->settings.save();
                 }
             } else if (r->manual) {
                 GtkWidget* dlg = gtk_message_dialog_new(
@@ -1311,6 +1325,7 @@ static void confirmDeleteSkin(const std::string& id) {
     }
     if (g_app->settings.customSkin == id) selectCustomSkin(*g_app, "");
     refreshDressingRoom(*g_app);
+    refreshSettingsWindow(*g_app);
 }
 
 static void confirmDeleteKeyboardSkin(const std::string& id) {
@@ -1337,6 +1352,7 @@ static void confirmDeleteKeyboardSkin(const std::string& id) {
     }
     if (g_app->settings.customKeyboard == id) selectCustomKeyboard(*g_app, "");
     refreshDressingRoom(*g_app);
+    refreshSettingsWindow(*g_app);
 }
 
 static void showSettingsWindow();
@@ -1410,6 +1426,7 @@ static void refreshSettingsWindow(LinuxApp& app) {
     setChk(app.setLevelKeyboardChk, app.settings.levelKeyboard);
     setChk(app.setTopmostChk, app.settings.alwaysOnTop);
     setChk(app.setAutohideChk, app.settings.autoHideFullscreen);
+    setChk(app.setAutoHeadphonesChk, app.settings.autoHeadphonesOnMusic);
     setChk(app.setClickThroughChk, app.settings.fullClickThrough);
     setChk(app.setAutostartChk, isAutoStartEnabled());
     setChk(app.setHighFpsChk, app.settings.highFrameRate);
@@ -1428,6 +1445,14 @@ static void refreshSettingsWindow(LinuxApp& app) {
     if (app.setSkinsDirLabel) {
         gtk_label_set_text(GTK_LABEL(app.setSkinsDirLabel), abbreviatedSkinsDirText().c_str());
         gtk_widget_set_tooltip_text(app.setSkinsDirLabel, SkinLibrary::dir().c_str());
+    }
+    if (app.setDeleteSkinBtn) {
+        bool hasCustom = !app.settings.customSkin.empty() && app.skins.find(app.settings.customSkin) != nullptr;
+        gtk_widget_set_sensitive(app.setDeleteSkinBtn, hasCustom ? TRUE : FALSE);
+    }
+    if (app.setDeleteKbBtn) {
+        bool hasCustomKb = !app.settings.customKeyboard.empty() && app.kbLibrary.find(app.settings.customKeyboard) != nullptr;
+        gtk_widget_set_sensitive(app.setDeleteKbBtn, hasCustomKb ? TRUE : FALSE);
     }
     if (app.setResetSkinsDirBtn) {
         gtk_widget_set_sensitive(app.setResetSkinsDirBtn, SkinLibrary::isUsingCustomDir() ? TRUE : FALSE);
@@ -1457,17 +1482,28 @@ static void showSettingsWindow() {
 
     GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win), tr("KuroCat 设置", "KuroCat Settings", "Configurações do KuroCat"));
-    gtk_window_set_default_size(GTK_WINDOW(win), 500, 620);
-    gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER);
+    int defW = 500, defH = 620;
+    GdkRectangle wa = { 0, 0, 1280, 800 };
+    if (GdkDisplay* dpy = gdk_display_get_default()) {
+        GdkMonitor* mon = gdk_display_get_primary_monitor(dpy);
+        if (!mon) mon = gdk_display_get_monitor(dpy, 0);
+        if (mon) {
+            gdk_monitor_get_workarea(mon, &wa);
+            defW = std::min(500, std::max(340, wa.width - 40));
+            defH = std::min(620, std::max(340, wa.height - 72));
+        }
+    }
+    gtk_window_set_default_size(GTK_WINDOW(win), defW, defH);
+    gtk_window_move(GTK_WINDOW(win), wa.x + std::max(0, (wa.width - defW) / 2), wa.y + std::max(12, (wa.height - defH) / 2));
     app.settingsWindow = win;
 
     g_signal_connect(win, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {
         g_app->settingsWindow = nullptr;
-        g_app->setCoatCombo = g_app->setSkinsDirLabel = g_app->setResetSkinsDirBtn = g_app->setEyeCombo = g_app->setKbCombo = nullptr;
+        g_app->setCoatCombo = g_app->setDeleteSkinBtn = g_app->setSkinsDirLabel = g_app->setResetSkinsDirBtn = g_app->setEyeCombo = g_app->setKbCombo = g_app->setDeleteKbBtn = nullptr;
         g_app->setScaleSlider = g_app->setScaleLabel = g_app->setRotSlider = g_app->setRotLabel = nullptr;
         g_app->setFlipChk = g_app->setOutlineChk = g_app->setAngerChk = g_app->setPetChk = nullptr;
         g_app->setBadgesChk = g_app->setMouseBadgesChk = g_app->setLegendsChk = g_app->setMarqueeChk = g_app->setLevelKeyboardChk = g_app->setTypingLimbCombo = nullptr;
-        g_app->setTabletCombo = g_app->setTopmostChk = g_app->setAutohideChk = g_app->setClickThroughChk = nullptr;
+        g_app->setTabletCombo = g_app->setTopmostChk = g_app->setAutohideChk = g_app->setAutoHeadphonesChk = g_app->setClickThroughChk = nullptr;
         g_app->setAutostartChk = g_app->setHighFpsChk = g_app->setObsCombo = g_app->setObsHideChk = g_app->setLangCombo = nullptr;
     }), nullptr);
 
@@ -1523,11 +1559,19 @@ static void showSettingsWindow() {
             updateInputShape(*g_app);
             if (g_app->drawArea) gtk_widget_queue_draw(g_app->drawArea);
             refreshDressingRoom(*g_app);
+            refreshSettingsWindow(*g_app);
         }), nullptr);
         gtk_grid_attach(GTK_GRID(g), app.setCoatCombo, 1, r, 1, 1);
+        GtkWidget* coatActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
         GtkWidget* dressBtn = gtk_button_new_with_label(tr("换装间…", "Wardrobe…", "Provador…"));
         g_signal_connect(dressBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { showDressingRoom(); }), nullptr);
-        gtk_grid_attach(GTK_GRID(g), dressBtn, 2, r++, 1, 1);
+        app.setDeleteSkinBtn = gtk_button_new_with_label(tr("删除", "Delete", "Excluir"));
+        g_signal_connect(app.setDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            if (!g_app->settings.customSkin.empty()) confirmDeleteSkin(g_app->settings.customSkin);
+        }), nullptr);
+        gtk_box_pack_start(GTK_BOX(coatActions), dressBtn, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(coatActions), app.setDeleteSkinBtn, FALSE, FALSE, 0);
+        gtk_grid_attach(GTK_GRID(g), coatActions, 2, r++, 1, 1);
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("皮肤目录", "Skins Dir", "Pasta")), 0, r, 1, 1);
         app.setSkinsDirLabel = leftLabel(abbreviatedSkinsDirText().c_str());
@@ -1610,11 +1654,19 @@ static void showSettingsWindow() {
             }
             g_app->settings.save();
             if (g_app->drawArea) gtk_widget_queue_draw(g_app->drawArea);
+            refreshSettingsWindow(*g_app);
         }), nullptr);
         gtk_grid_attach(GTK_GRID(g), app.setKbCombo, 1, r, 1, 1);
+        GtkWidget* kbActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
         GtkWidget* kbBtn = gtk_button_new_with_label(tr("导入键盘…", "Import…", "Importar…"));
         g_signal_connect(kbBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { chooseKeyboardSkinFile(); }), nullptr);
-        gtk_grid_attach(GTK_GRID(g), kbBtn, 2, r++, 1, 1);
+        app.setDeleteKbBtn = gtk_button_new_with_label(tr("删除", "Delete", "Excluir"));
+        g_signal_connect(app.setDeleteKbBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            if (!g_app->settings.customKeyboard.empty()) confirmDeleteKeyboardSkin(g_app->settings.customKeyboard);
+        }), nullptr);
+        gtk_box_pack_start(GTK_BOX(kbActions), kbBtn, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(kbActions), app.setDeleteKbBtn, FALSE, FALSE, 0);
+        gtk_grid_attach(GTK_GRID(g), kbActions, 2, r++, 1, 1);
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("缩放大小", "Pet Scale", "Tamanho")), 0, r, 1, 1);
         app.setScaleSlider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 45.0, 250.0, 1.0);
@@ -1845,6 +1897,15 @@ static void showSettingsWindow() {
         gtk_grid_attach(GTK_GRID(g), app.setClickThroughChk, 0, r, 1, 1);
         gtk_grid_attach(GTK_GRID(g), app.setAutostartChk, 1, r++, 2, 1);
 
+        app.setAutoHeadphonesChk = gtk_check_button_new_with_label(tr("听歌自动戴耳机（音乐/媒体播放器）", "Auto Headphones on Music", "Fones automáticos ao ouvir música"));
+        g_signal_connect(app.setAutoHeadphonesChk, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer) {
+            if (g_app->settingsUpdating) return;
+            g_app->settings.autoHeadphonesOnMusic = gtk_toggle_button_get_active(b);
+            if (!g_app->settings.autoHeadphonesOnMusic) g_app->physics.isMusicPlaying = false;
+            g_app->settings.save();
+        }), nullptr);
+        gtk_grid_attach(GTK_GRID(g), app.setAutoHeadphonesChk, 0, r++, 3, 1);
+
         app.setHighFpsChk = gtk_check_button_new_with_label(tr("高帧率 60fps（电脑卡顿时请关闭）", "High FPS 60fps", "Alta taxa de quadros (60 fps)"));
         g_signal_connect(app.setHighFpsChk, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer) {
             if (g_app->settingsUpdating) return;
@@ -1997,6 +2058,20 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
             gtk_menu_shell_append(GTK_MENU_SHELL(sub), it);
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(sub), gtk_separator_menu_item_new());
+        if (!app.skins.skins.empty()) {
+            GtkWidget* delSub = gtk_menu_new();
+            for (const SkinSpec& s : app.skins.skins) {
+                GtkWidget* di = gtk_menu_item_new_with_label(s.name.c_str());
+                g_object_set_data_full(G_OBJECT(di), "skin-id", g_strdup(s.id.c_str()), g_free);
+                g_signal_connect(di, "activate", G_CALLBACK(+[](GtkMenuItem* item, gpointer) {
+                    confirmDeleteSkin((const char*)g_object_get_data(G_OBJECT(item), "skin-id"));
+                }), nullptr);
+                gtk_menu_shell_append(GTK_MENU_SHELL(delSub), di);
+            }
+            GtkWidget* delParent = gtk_menu_item_new_with_label(tr("删除已导入皮肤…", "Delete Imported Skin…", "Excluir skin importada…"));
+            gtk_menu_item_set_submenu(GTK_MENU_ITEM(delParent), delSub);
+            gtk_menu_shell_append(GTK_MENU_SHELL(sub), delParent);
+        }
         GtkWidget* importItem = gtk_menu_item_new_with_label(tr("导入皮肤 / 换装间…", "Import Skin / Wardrobe…", "Importar skin / Provador…"));
         g_signal_connect(importItem, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { showDressingRoom(); }), nullptr);
         gtk_menu_shell_append(GTK_MENU_SHELL(sub), importItem);
@@ -2311,6 +2386,141 @@ static guint desiredFrameIntervalMs(const LinuxApp& app) {
     return 50;
 }
 
+static bool isX11ShowingDesktop() {
+    GdkDisplay* gdpy = gdk_display_get_default();
+    if (!gdpy || !GDK_IS_X11_DISPLAY(gdpy)) return false;
+    Display* dpy = GDK_DISPLAY_XDISPLAY(gdpy);
+    if (!dpy) return false;
+    static Atom aShowDesk = 0;
+    if (aShowDesk == 0) aShowDesk = XInternAtom(dpy, "_NET_SHOWING_DESKTOP", True);
+    if (aShowDesk == 0) return false;
+    Atom actualType = 0;
+    int actualFormat = 0;
+    unsigned long nItems = 0, bytesAfter = 0;
+    unsigned char* prop = nullptr;
+    bool showing = false;
+    if (XGetWindowProperty(dpy, DefaultRootWindow(dpy), aShowDesk, 0, 1, False, XA_CARDINAL,
+                           &actualType, &actualFormat, &nItems, &bytesAfter, &prop) == Success && prop) {
+        if (nItems >= 1 && *(unsigned long*)prop != 0) showing = true;
+        XFree(prop);
+    }
+    return showing;
+}
+
+static void keepPetVisibleOnShowDesktop(LinuxApp& app) {
+    if (!app.window || !app.isVisible || app.hiddenByFullscreen) return;
+    if (!app.settings.alwaysOnTop || app.settings.obsCaptureMode > 0) return;
+    GdkWindow* gw = gtk_widget_get_window(app.window);
+    if (!gw) return;
+    GdkWindowState st = gdk_window_get_state(gw);
+    bool iconified = (st & GDK_WINDOW_STATE_ICONIFIED) != 0;
+    bool withdrawn = (st & GDK_WINDOW_STATE_WITHDRAWN) != 0;
+    bool notAbove = (st & GDK_WINDOW_STATE_ABOVE) == 0;
+    if (iconified || withdrawn || notAbove || isX11ShowingDesktop()) {
+        if (withdrawn) gtk_widget_show(app.window);
+        if (iconified) gtk_window_deiconify(GTK_WINDOW(app.window));
+        gtk_window_set_keep_above(GTK_WINDOW(app.window), TRUE);
+        gdk_window_raise(gw);
+    }
+}
+
+static gboolean onWindowStateEvent(GtkWidget*, GdkEventWindowState* ev, gpointer) {
+    if (!g_app || !ev) return FALSE;
+    if (g_app->isVisible && !g_app->hiddenByFullscreen && g_app->settings.alwaysOnTop && g_app->settings.obsCaptureMode == 0) {
+        if ((ev->new_window_state & GDK_WINDOW_STATE_ICONIFIED) != 0) {
+            // Kylin/UKUI Win+D or "Show Desktop" + clicking desktop minimizes UTILITY windows;
+            // restore immediately so the desktop pet never vanishes.
+            gtk_window_deiconify(GTK_WINDOW(g_app->window));
+            gtk_window_set_keep_above(GTK_WINDOW(g_app->window), TRUE);
+            if (GdkWindow* gw = gtk_widget_get_window(g_app->window)) gdk_window_raise(gw);
+        }
+    }
+    return FALSE;
+}
+
+/// Fast, zero-dependency fallback for browsers & video players that do not expose MPRIS:
+/// checks ALSA/PipeWire playback PCM subdevices (/proc/asound/card*/pcm*p/sub*/status) for RUNNING state.
+static bool isAlsaPlaybackRunning() {
+    DIR* asound = opendir("/proc/asound");
+    if (!asound) return false;
+    bool running = false;
+    struct dirent* cardEnt = nullptr;
+    while (!running && (cardEnt = readdir(asound)) != nullptr) {
+        if (std::strncmp(cardEnt->d_name, "card", 4) != 0) continue;
+        std::string cardPath = std::string("/proc/asound/") + cardEnt->d_name;
+        DIR* cardDir = opendir(cardPath.c_str());
+        if (!cardDir) continue;
+        struct dirent* pcmEnt = nullptr;
+        while (!running && (pcmEnt = readdir(cardDir)) != nullptr) {
+            size_t len = std::strlen(pcmEnt->d_name);
+            // Match playback streams only: pcm*p (excludes capture streams pcm*c)
+            if (len < 5 || std::strncmp(pcmEnt->d_name, "pcm", 3) != 0 || pcmEnt->d_name[len - 1] != 'p') continue;
+            std::string pcmPath = cardPath + "/" + pcmEnt->d_name;
+            DIR* pcmDir = opendir(pcmPath.c_str());
+            if (!pcmDir) continue;
+            struct dirent* subEnt = nullptr;
+            while (!running && (subEnt = readdir(pcmDir)) != nullptr) {
+                if (std::strncmp(subEnt->d_name, "sub", 3) != 0) continue;
+                std::ifstream st(pcmPath + "/" + subEnt->d_name + "/status");
+                std::string line;
+                if (std::getline(st, line) && line.find("RUNNING") != std::string::npos) {
+                    running = true;
+                }
+            }
+            closedir(pcmDir);
+        }
+        closedir(cardDir);
+    }
+    closedir(asound);
+    return running;
+}
+
+static bool isMprisMusicPlaying() {
+    static GDBusConnection* bus = nullptr;
+    if (!bus) {
+        GError* err = nullptr;
+        bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &err);
+        if (err) { g_error_free(err); return false; }
+        if (!bus) return false;
+    }
+    GError* err = nullptr;
+    GVariant* namesVar = g_dbus_connection_call_sync(
+        bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+        "ListNames", nullptr, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 80, nullptr, &err);
+    if (err) { g_error_free(err); return false; }
+    if (!namesVar) return false;
+
+    bool playing = false;
+    GVariantIter* iter = nullptr;
+    g_variant_get(namesVar, "(as)", &iter);
+    const gchar* name = nullptr;
+    while (iter && g_variant_iter_loop(iter, "&s", &name)) {
+        if (playing) continue;
+        if (!name || std::strncmp(name, "org.mpris.MediaPlayer2.", 23) != 0) continue;
+        GError* pErr = nullptr;
+        GVariant* prop = g_dbus_connection_call_sync(
+            bus, name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "Get",
+            g_variant_new("(ss)", "org.mpris.MediaPlayer2.Player", "PlaybackStatus"),
+            G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 60, nullptr, &pErr);
+        if (pErr) { g_error_free(pErr); continue; }
+        if (prop) {
+            GVariant* inner = nullptr;
+            g_variant_get(prop, "(v)", &inner);
+            if (inner) {
+                if (g_variant_is_of_type(inner, G_VARIANT_TYPE_STRING)) {
+                    const gchar* status = g_variant_get_string(inner, nullptr);
+                    if (status && std::strcmp(status, "Playing") == 0) playing = true;
+                }
+                g_variant_unref(inner);
+            }
+            g_variant_unref(prop);
+        }
+    }
+    if (iter) g_variant_iter_free(iter);
+    g_variant_unref(namesVar);
+    return playing;
+}
+
 static gboolean onFrameTick(gpointer);
 
 static void scheduleFrames(guint intervalMs) {
@@ -2349,6 +2559,25 @@ static gboolean onFrameTick(gpointer) {
                 gtk_widget_show(g_app->window);
                 if (g_app->settings.alwaysOnTop) gtk_window_set_keep_above(GTK_WINDOW(g_app->window), TRUE);
                 g_app->lastTickTime = now;
+            }
+        }
+        keepPetVisibleOnShowDesktop(*g_app);
+        static double s_nextMusicCheck = 0.0;
+        static double s_audioSustainedSince = 0.0;
+        if (!g_app->settings.autoHeadphonesOnMusic) {
+            s_audioSustainedSince = 0.0;
+            g_app->physics.isMusicPlaying = false;
+        } else if (now >= s_nextMusicCheck) {
+            s_nextMusicCheck = now + 0.9;
+            if (isMprisMusicPlaying()) {
+                s_audioSustainedSince = now - 2.0;
+                g_app->physics.isMusicPlaying = true;
+            } else if (isAlsaPlaybackRunning()) {
+                if (s_audioSustainedSince == 0.0) s_audioSustainedSince = now;
+                g_app->physics.isMusicPlaying = (now - s_audioSustainedSince) >= 1.2;
+            } else {
+                s_audioSustainedSince = 0.0;
+                g_app->physics.isMusicPlaying = false;
             }
         }
     }
@@ -2575,6 +2804,7 @@ int main(int argc, char** argv) {
     g_signal_connect(app.window, "motion-notify-event", G_CALLBACK(onMotionNotify), nullptr);
     g_signal_connect(app.window, "button-release-event", G_CALLBACK(onButtonRelease), nullptr);
     g_signal_connect(app.window, "scroll-event", G_CALLBACK(onScrollEvent), nullptr);
+    g_signal_connect(app.window, "window-state-event", G_CALLBACK(onWindowStateEvent), nullptr);
     app.zoomGesture = gtk_gesture_zoom_new(app.window);
     g_signal_connect(app.zoomGesture, "begin", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer) {
         if (g_app) g_app->pinchStartScale = g_app->settings.scale;

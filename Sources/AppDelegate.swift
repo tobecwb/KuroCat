@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CoreAudio
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum RenderCadence {
@@ -36,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var renderCadence: RenderCadence = .paused
     private var windowWatchdogTimer: Timer?
     private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
+    private var lastMusicCheckTime: CFTimeInterval = 0
+    private var musicAudioSustainedSince: CFTimeInterval = 0
+    private var cachedMusicPlaying: Bool = false
+    private let musicCheckQueue = DispatchQueue(label: "com.kurocat.musiccheck", qos: .utility)
     private var lastFullscreenCheckTime: CFTimeInterval = 0
     private var hiddenByFullscreen = false
     private var screensAsleep = false
@@ -46,8 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var availableAssetURL: URL?
     private var isUpdating = false
     private var isHandingOverToNewerCopy = false
+    private var isPresentingModalAlert = false
     private var dressingRoom: DressingRoomWindowController?
     private var settingsWindow: SettingsWindowController?
+    private var updatePromptController: UpdatePromptWindowController?
 
     // MARK: - Hourly Announcement
     private var minuteTimer: Timer?
@@ -279,6 +286,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return hiddenByFullscreen
     }
 
+    /// Returns true if any active macOS audio output device (speakers, AirPods/Bluetooth/USB headphones,
+    /// multi-output or virtual device) is currently streaming audio. Works for Apple Music, browsers
+    /// (Bilibili/YouTube/Douyin/etc.), and all local video/music players without needing an app whitelist.
+    private static func isAnyAudioOutputRunning() -> Bool {
+        func deviceHasOutputAndRunning(_ devID: AudioDeviceID) -> Bool {
+            var sSize: UInt32 = 0
+            var sAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            guard AudioObjectGetPropertyDataSize(devID, &sAddr, 0, nil, &sSize) == noErr, sSize > 0 else {
+                return false
+            }
+            let buf = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(sSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { buf.deallocate() }
+            var outChannels: UInt32 = 0
+            if AudioObjectGetPropertyData(devID, &sAddr, 0, nil, &sSize, buf) == noErr {
+                let abl = UnsafeMutableAudioBufferListPointer(buf.assumingMemoryBound(to: AudioBufferList.self))
+                for b in abl { outChannels += b.mNumberChannels }
+            }
+            guard outChannels > 0 else { return false }
+
+            var running: UInt32 = 0
+            var runSize = UInt32(MemoryLayout<UInt32>.size)
+            var runAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            guard AudioObjectGetPropertyData(devID, &runAddr, 0, nil, &runSize, &running) == noErr else {
+                return false
+            }
+            return running != 0
+        }
+
+        // Enumerate all audio devices so Bluetooth/USB headphones & secondary output devices are always covered
+        var propSize: UInt32 = 0
+        var listAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &propSize) == noErr,
+           propSize >= UInt32(MemoryLayout<AudioDeviceID>.size) {
+            let count = Int(propSize) / MemoryLayout<AudioDeviceID>.size
+            var devices = [AudioDeviceID](repeating: AudioDeviceID(kAudioObjectUnknown), count: count)
+            if AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &propSize, &devices) == noErr {
+                for dev in devices where dev != kAudioObjectUnknown {
+                    if deviceHasOutputAndRunning(dev) { return true }
+                }
+                return false
+            }
+        }
+
+        // Fallback: check default output device directly
+        var devID = AudioObjectID(kAudioObjectUnknown)
+        var devSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var devAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &devAddr, 0, nil, &devSize, &devID) == noErr,
+              devID != kAudioObjectUnknown else {
+            return false
+        }
+        return deviceHasOutputAndRunning(devID)
+    }
+
+    private func pollMusicStateIfNeeded(now: CFTimeInterval) {
+        guard CatSettings.shared.autoHeadphonesOnMusic else {
+            if cachedMusicPlaying {
+                cachedMusicPlaying = false
+                musicAudioSustainedSince = 0
+                overlayWindow.catView.physics.isMusicPlaying = false
+            }
+            return
+        }
+        if now - lastMusicCheckTime < 1.0 { return }
+        lastMusicCheckTime = now
+
+        musicCheckQueue.async { [weak self] in
+            guard let self = self else { return }
+            let audioRunning = Self.isAnyAudioOutputRunning()
+            DispatchQueue.main.async {
+                let playing: Bool
+                if audioRunning {
+                    if self.musicAudioSustainedSince == 0 {
+                        self.musicAudioSustainedSince = now
+                    }
+                    // Require >= 1.5s continuous audio output to ignore brief UI/notification dings
+                    playing = (now - self.musicAudioSustainedSince) >= 1.5
+                } else {
+                    self.musicAudioSustainedSince = 0
+                    playing = false
+                }
+                self.cachedMusicPlaying = playing
+                self.overlayWindow.catView.physics.isMusicPlaying = playing
+            }
+        }
+    }
+
     private func renderTick() {
         guard isPetVisible, !screensAsleep else {
             configureRenderTimer(for: .paused)
@@ -289,6 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             configureRenderTimer(for: .fullscreenHidden)
             return
         }
+        pollMusicStateIfNeeded(now: now)
 
         let dt = CGFloat(now - lastFrameTime)
         lastFrameTime = now
@@ -580,6 +694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             ctrl.onApplyWindowLevel = { [weak self] in
                 self?.overlayWindow.applyWindowLevelAndBehavior()
+                self?.dressingRoom?.syncWindowLevel()
+                self?.settingsWindow?.syncWindowLevel()
+                self?.updatePromptController?.syncWindowLevel()
                 self?.syncWindowTopmost()
             }
             ctrl.onApplyOBSMode = { [weak self] in
@@ -621,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.addButton(withTitle: loc("重启 KuroCat", "Restart KuroCat", "Reiniciar KuroCat"))
             alert.addButton(withTitle: loc("打开输入监控", "Open Input Monitoring", "Abrir Monitoramento de Entrada"))
             alert.addButton(withTitle: loc("取消", "Cancel", "Cancelar"))
-            let response = alert.runModal()
+            let response = runModalAlert(alert)
             if response == .alertFirstButtonReturn {
                 relaunchApp()
                 return
@@ -657,6 +774,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleFullScreenOverlay() {
         CatSettings.shared.fullScreenOverlay.toggle()
         overlayWindow.applyWindowLevelAndBehavior()
+        dressingRoom?.syncWindowLevel()
+        settingsWindow?.syncWindowLevel()
+        updatePromptController?.syncWindowLevel()
         syncWindowTopmost()
     }
 
@@ -683,13 +803,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func syncWindowTopmost() {
-        guard let overlayWindow, isPetVisible, !hiddenByFullscreen, !screensAsleep else { return }
+        guard let overlayWindow, isPetVisible, !hiddenByFullscreen, !screensAsleep, !isPresentingModalAlert else { return }
         let s = CatSettings.shared
         let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
         if obsBg { return }
         if s.fullScreenOverlay {
             overlayWindow.orderFrontRegardless()
         }
+    }
+
+    /// Presents a modal NSAlert strictly above the overlay window (whose .popUpMenuWindow level 101
+    /// would otherwise obscure and intercept clicks on a standard .modalPanel level-8 alert).
+    @discardableResult
+    private func runModalAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        runWithOverlayYielding {
+            alert.window.level = NSWindow.Level(rawValue: max(
+                Int(CGWindowLevelForKey(.screenSaverWindow)),
+                Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2
+            ))
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+            NSApp.activate(ignoringOtherApps: true)
+            alert.window.orderFrontRegardless()
+            return alert.runModal()
+        }
+    }
+
+    private func runWithOverlayYielding<T>(_ body: () -> T) -> T {
+        isPresentingModalAlert = true
+        overlayWindow?.catView.forceClickThroughForModal = true
+        let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
+        if let overlayWindow, !obsBg {
+            overlayWindow.level = .floating
+            overlayWindow.ignoresMouseEvents = true
+        }
+        defer {
+            isPresentingModalAlert = false
+            overlayWindow?.catView.forceClickThroughForModal = false
+            if let overlayWindow, !obsBg {
+                overlayWindow.applyWindowLevelAndBehavior()
+                syncWindowTopmost()
+            }
+        }
+        return body()
     }
 
     // MARK: - Launch at Login (macOS LaunchAgent — works reliably for signed & ad-hoc builds)
@@ -941,8 +1096,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.messageText = loc("无法导入这个皮肤", "Failed to Import Skin", "Não foi possível importar a skin")
             alert.informativeText = "「\(url.lastPathComponent)」：\(reason)"
             alert.addButton(withTitle: loc("知道了", "OK", "OK"))
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+            runModalAlert(alert)
         }
     }
 
@@ -974,8 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         input.stringValue = skin.name
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
 
         let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if newName.isEmpty || newName == skin.name { return }
@@ -991,7 +1144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             failed.alertStyle = .warning
             failed.messageText = loc("重命名失败", "Rename Failed", "Falha ao renomear")
             failed.informativeText = error.localizedDescription
-            failed.runModal()
+            runModalAlert(failed)
         }
     }
 
@@ -1011,13 +1164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let delBtn = alert.addButton(withTitle: loc("🗑 删除", "🗑 Delete", "🗑 Excluir"))
         if #available(macOS 11.0, *) { delBtn.hasDestructiveAction = true }
         alert.addButton(withTitle: loc("取消", "Cancel", "Cancelar"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
         if !SkinLibrary.shared.remove(id: id) {
             let failed = NSAlert()
             failed.messageText = loc("删除失败", "Delete Failed", "Falha ao excluir")
             failed.informativeText = loc("无法删除 ", "Couldn't delete ", "Não foi possível excluir ") + "\(SkinLibrary.directory.appendingPathComponent("\(id).kurocat").path)"
-            failed.runModal()
+            runModalAlert(failed)
             return
         }
         if CatSettings.shared.customSkin == id { CatSettings.shared.customSkin = "" }
@@ -1059,8 +1211,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedFileTypes = ["kurokb", "json"]
-        NSApp.activate(ignoringOtherApps: true)
-        if panel.runModal() == .OK, let url = panel.url {
+        let resp = runWithOverlayYielding {
+            panel.level = NSWindow.Level(rawValue: max(
+                Int(CGWindowLevelForKey(.screenSaverWindow)),
+                Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2
+            ))
+            NSApp.activate(ignoringOtherApps: true)
+            return panel.runModal()
+        }
+        if resp == .OK, let url = panel.url {
             importKeyboardSkin(from: url)
         }
     }
@@ -1082,8 +1241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.messageText = loc("无法导入这个键盘皮肤", "Failed to Import Keyboard Skin", "Não foi possível importar a skin de teclado")
             alert.informativeText = "「\(url.lastPathComponent)」：\(error.localizedDescription)"
             alert.addButton(withTitle: loc("知道了", "OK", "OK"))
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+            runModalAlert(alert)
         }
     }
 
@@ -1096,13 +1254,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     "O arquivo será apagado da pasta de skins de teclado; para usá-la de novo será preciso importar outra vez.")
         alert.addButton(withTitle: loc("删除", "Delete", "Excluir"))
         alert.addButton(withTitle: loc("取消", "Cancel", "Cancelar"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
         if !KeyboardSkinLibrary.shared.remove(id: id) {
             let failed = NSAlert()
             failed.messageText = loc("删除失败", "Delete Failed", "Falha ao excluir")
             failed.informativeText = loc("无法删除 ", "Couldn't delete ", "Não foi possível excluir ") + "\(KeyboardSkinLibrary.directory.appendingPathComponent("\(id).kurokb").path)"
-            failed.runModal()
+            runModalAlert(failed)
             return
         }
         if CatSettings.shared.customKeyboard == id { CatSettings.shared.customKeyboard = "" }
@@ -1243,29 +1400,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func presentNonModalUpdatePrompt(
+        title: String,
+        message: String,
+        primaryTitle: String,
+        secondaryTitle: String? = nil,
+        cancelTitle: String,
+        onPrimary: @escaping () -> Void,
+        onSecondary: (() -> Void)? = nil,
+        onCancel: @escaping () -> Void
+    ) {
+        let ctrl = updatePromptController ?? UpdatePromptWindowController()
+        updatePromptController = ctrl
+        ctrl.configure(
+            title: title,
+            message: message,
+            primaryTitle: primaryTitle,
+            secondaryTitle: secondaryTitle,
+            cancelTitle: cancelTitle,
+            onPrimary: onPrimary,
+            onSecondary: onSecondary,
+            onCancel: onCancel
+        )
+        ctrl.present()
+    }
+
     private func handleUpdateResult(_ info: (tag: String, pageURL: URL?, assetURL: URL?), manual: Bool) {
         if isVersion(info.tag, newerThan: currentAppVersion),
            let local = newestDownloadedCopy(), !isVersion(info.tag, newerThan: local.version) {
-            // The user already downloaded the latest version; they are just still running the old copy.
-            NSApp.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = loc("你已经下载了新版本 v\(local.version)", "You already downloaded v\(local.version)", "Você já baixou a versão v\(local.version)")
-            alert.informativeText = loc(
-                "但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\n\n点击「切换到新版本」会关闭旧版并打开新版。建议把新版拖进「应用程序」文件夹并删除旧版。",
-                "But the old v\(currentAppVersion) is still running:\n\(Bundle.main.bundlePath)\n\nNew version location:\n\(local.url.path)\n\n\"Switch to New Version\" closes the old copy and opens the new one. We recommend moving the new one to Applications and deleting the old one.",
-                "Mas a versão antiga v\(currentAppVersion) ainda está em execução:\n\(Bundle.main.bundlePath)\n\nLocal da nova versão:\n\(local.url.path)\n\n\"Usar a nova versão\" fecha a antiga e abre a nova. Recomendamos mover a nova para a pasta Aplicativos e apagar a antiga.")
-            alert.addButton(withTitle: loc("切换到新版本", "Switch to New Version", "Usar a nova versão"))
-            alert.addButton(withTitle: loc("稍后再说", "Later", "Depois"))
-            if alert.runModal() == .alertFirstButtonReturn {
-                switchToDownloadedCopy(local.url)
-            }
+            availableUpdateVersion = info.tag
+            availableUpdateURL = info.pageURL
+            availableAssetURL = info.assetURL
+            if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
+            // Present non-modally above the overlay window so right-click menus and quitting remain responsive.
+            presentNonModalUpdatePrompt(
+                title: loc("你已经下载了新版本 v\(local.version)", "You already downloaded v\(local.version)", "Você já baixou a versão v\(local.version)"),
+                message: loc("但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\n\n点击「切换到新版本」会关闭旧版并打开新版。点击「暂不更新」后续将不再自动弹窗提醒。",
+                             "But the old v\(currentAppVersion) is still running:\n\(Bundle.main.bundlePath)\n\nNew version location:\n\(local.url.path)\n\n\"Switch to New Version\" closes the old copy and opens the new one. \"Not Now\" stops these automatic reminders.",
+                             "Mas a versão antiga v\(currentAppVersion) ainda está em execução:\n\(Bundle.main.bundlePath)\n\nLocal da nova versão:\n\(local.url.path)\n\n\"Usar a nova versão\" fecha a antiga e abre a nova. \"Agora não\" desativa estes lembretes automáticos."),
+                primaryTitle: loc("切换到新版本", "Switch to New Version", "Usar a nova versão"),
+                cancelTitle: loc("暂不更新", "Not Now", "Agora não"),
+                onPrimary: { [weak self] in
+                    CatSettings.shared.suppressAutoUpdatePrompt = false
+                    self?.switchToDownloadedCopy(local.url)
+                },
+                onCancel: {
+                    CatSettings.shared.suppressAutoUpdatePrompt = true
+                }
+            )
             return
         }
         if isVersion(info.tag, newerThan: currentAppVersion) {
             availableUpdateVersion = info.tag
             availableUpdateURL = info.pageURL
             availableAssetURL = info.assetURL
+            if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
             promptUpdateAvailable(latestTag: info.tag)
         } else if manual {
             showInfoAlert(title: loc("已是最新版本", "You're Up to Date", "Você está atualizado"),
@@ -1292,24 +1481,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func promptUpdateAvailable(latestTag: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = loc("发现 KuroCat 新版本 \(latestTag)", "KuroCat \(latestTag) Is Available", "Nova versão do KuroCat: \(latestTag)")
-        alert.informativeText = loc(
-            "当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。",
-            "Current version: v\(currentAppVersion)\nLatest version: \(latestTag)\nRunning from: \(Bundle.main.bundlePath)\n\n\"Update Now\" downloads the installer in the background and restarts the app.",
-            "Versão atual: v\(currentAppVersion)\nVersão mais recente: \(latestTag)\nExecutando de: \(Bundle.main.bundlePath)\n\n\"Atualizar agora\" baixa o instalador em segundo plano e reinicia o app.")
-        alert.addButton(withTitle: loc("立即更新", "Update Now", "Atualizar agora"))
-        alert.addButton(withTitle: loc("打开下载页", "Open Download Page", "Abrir página de download"))
-        alert.addButton(withTitle: loc("稍后再说", "Later", "Depois"))
-        let resp = alert.runModal()
-        if resp == .alertFirstButtonReturn {
-            performInAppUpdate()
-        } else if resp == .alertSecondButtonReturn {
-            let fallback = URL(string: Self.updatePageURLString)!
-            NSWorkspace.shared.open(availableUpdateURL ?? fallback)
-        }
+        presentNonModalUpdatePrompt(
+            title: loc("发现 KuroCat 新版本 \(latestTag)", "KuroCat \(latestTag) Is Available", "Nova versão do KuroCat: \(latestTag)"),
+            message: loc("当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在菜单栏点击「检查更新」）。",
+                         "Current version: v\(currentAppVersion)\nLatest version: \(latestTag)\nRunning from: \(Bundle.main.bundlePath)\n\n\"Update Now\" downloads the installer in the background and restarts the app.\n\"Not Now\" stops automatic reminders (you can still use Check for Updates in the menu).",
+                         "Versão atual: v\(currentAppVersion)\nVersão mais recente: \(latestTag)\nExecutando de: \(Bundle.main.bundlePath)\n\n\"Atualizar agora\" baixa o instalador em segundo plano e reinicia o app.\n\"Agora não\" desativa os lembretes automáticos (o item Verificar atualizações do menu continua disponível)."),
+            primaryTitle: loc("立即更新", "Update Now", "Atualizar agora"),
+            secondaryTitle: loc("打开下载页", "Open Download Page", "Abrir página de download"),
+            cancelTitle: loc("暂不更新", "Not Now", "Agora não"),
+            onPrimary: { [weak self] in
+                CatSettings.shared.suppressAutoUpdatePrompt = false
+                self?.performInAppUpdate()
+            },
+            onSecondary: { [weak self] in
+                let fallback = URL(string: Self.updatePageURLString)!
+                NSWorkspace.shared.open(self?.availableUpdateURL ?? fallback)
+            },
+            onCancel: {
+                CatSettings.shared.suppressAutoUpdatePrompt = true
+            }
+        )
     }
 
     private func performInAppUpdate() {
@@ -1434,7 +1625,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleUpdateDownloadFailure() {
-        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = loc("自动更新失败", "Automatic Update Failed", "Falha na atualização automática")
@@ -1443,20 +1633,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     "Houve um erro ao baixar ou substituir o app. Abrir a página de download para atualizar manualmente?")
         alert.addButton(withTitle: loc("打开下载页", "Open Download Page", "Abrir página de download"))
         alert.addButton(withTitle: loc("取消", "Cancel", "Cancelar"))
-        if alert.runModal() == .alertFirstButtonReturn {
+        if runModalAlert(alert) == .alertFirstButtonReturn {
             let fallback = URL(string: Self.updatePageURLString)!
             NSWorkspace.shared.open(availableUpdateURL ?? fallback)
         }
     }
 
     private func showInfoAlert(title: String, message: String) {
-        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: loc("好", "OK", "OK"))
-        alert.runModal()
+        runModalAlert(alert)
     }
 
     // MARK: - Crisp Vector Menu Bar Cat Silhouette Icon
@@ -1548,5 +1737,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let text = "🕐 \(period) \(displayHour) 点整"
         overlayWindow.catView.showToast(text: text)
         wakeToActive(immediateRedraw: true)
+    }
+}
+
+/// Non-modal update prompt kept strictly above the overlay window so buttons stay clickable
+/// and right-click context menus / quitting remain completely responsive.
+private final class UpdatePromptWindowController: NSWindowController {
+    private var primaryAction: (() -> Void)?
+    private var secondaryAction: (() -> Void)?
+    private var cancelAction: (() -> Void)?
+
+    private final class FlippedContentView: NSView {
+        override var isFlipped: Bool { true }
+    }
+
+    init() {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = loc("KuroCat 更新提醒", "KuroCat Update", "Atualização do KuroCat")
+        win.isReleasedWhenClosed = false
+        super.init(window: win)
+        syncWindowLevel()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func syncWindowLevel() {
+        guard let window else { return }
+        window.level = CatSettings.shared.fullScreenOverlay
+            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
+            : .modalPanel
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+    }
+
+    func configure(
+        title: String,
+        message: String,
+        primaryTitle: String,
+        secondaryTitle: String?,
+        cancelTitle: String,
+        onPrimary: @escaping () -> Void,
+        onSecondary: (() -> Void)?,
+        onCancel: @escaping () -> Void
+    ) {
+        primaryAction = onPrimary
+        secondaryAction = onSecondary
+        cancelAction = onCancel
+
+        guard let window else { return }
+        let width: CGFloat = 440
+        let textX: CGFloat = 86
+        let textW: CGFloat = width - textX - 22
+
+        let content = FlippedContentView(frame: NSRect(x: 0, y: 0, width: width, height: 220))
+
+        let iconView = NSImageView(frame: NSRect(x: 20, y: 20, width: 52, height: 52))
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        content.addSubview(iconView)
+
+        let titleField = NSTextField(wrappingLabelWithString: title)
+        titleField.font = .systemFont(ofSize: 14, weight: .bold)
+        titleField.textColor = .labelColor
+        let titleH = ceil(titleField.sizeThatFits(NSSize(width: textW, height: 200)).height)
+        titleField.frame = NSRect(x: textX, y: 20, width: textW, height: titleH)
+        content.addSubview(titleField)
+
+        let msgField = NSTextField(wrappingLabelWithString: message)
+        msgField.font = .systemFont(ofSize: 12.5)
+        msgField.textColor = .labelColor
+        msgField.isSelectable = true
+        let msgH = ceil(msgField.sizeThatFits(NSSize(width: textW, height: 600)).height)
+        msgField.frame = NSRect(x: textX, y: 20 + titleH + 8, width: textW, height: msgH)
+        content.addSubview(msgField)
+
+        let btnY = max(88, 20 + titleH + 8 + msgH + 18)
+        var rightEdge = width - 20
+
+        func addButton(title: String, keyEquivalent: String, action: Selector) {
+            let btn = NSButton(title: title, target: self, action: action)
+            btn.bezelStyle = .rounded
+            btn.keyEquivalent = keyEquivalent
+            btn.sizeToFit()
+            let bw = max(90, ceil(btn.frame.width) + 18)
+            rightEdge -= bw
+            btn.frame = NSRect(x: rightEdge, y: btnY, width: bw, height: 28)
+            content.addSubview(btn)
+            rightEdge -= 8
+        }
+
+        addButton(title: primaryTitle, keyEquivalent: "\r", action: #selector(handlePrimary))
+        if let secondaryTitle {
+            addButton(title: secondaryTitle, keyEquivalent: "", action: #selector(handleSecondary))
+        }
+        addButton(title: cancelTitle, keyEquivalent: "\u{1b}", action: #selector(handleCancel))
+
+        let totalH = btnY + 28 + 18
+        content.frame = NSRect(x: 0, y: 0, width: width, height: totalH)
+        window.contentView = content
+        window.setContentSize(NSSize(width: width, height: totalH))
+    }
+
+    func present() {
+        syncWindowLevel()
+        window?.center()
+        NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
+    }
+
+    @objc private func handlePrimary() {
+        window?.orderOut(nil)
+        primaryAction?()
+    }
+
+    @objc private func handleSecondary() {
+        window?.orderOut(nil)
+        secondaryAction?()
+    }
+
+    @objc private func handleCancel() {
+        window?.orderOut(nil)
+        cancelAction?()
     }
 }

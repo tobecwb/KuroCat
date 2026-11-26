@@ -30,7 +30,7 @@ enum class SkinSpace : int { Head = 0, Skull, Body, Tail, LeftEar, RightEar, Lef
 enum class SkinBuild : int { Standard = 0, Sleek };
 enum class SkinHeadSurface : int { Dome = 0, Plane };
 enum class SkinAnchorPoint : int { HeadTop = 0, Face, Neck, TailTip };
-enum class SkinRenderStyle : int { Standard = 0, Douni, Dazed };
+enum class SkinRenderStyle : int { Standard = 0, Douni, Dazed, Beagle };
 enum class SkinTypingStyle : int { Standard = 0, Douni };
 
 struct SkinPoint { float x = 0, y = 0; };
@@ -45,6 +45,8 @@ struct SkinRegion {
     std::vector<SkinPoint> flat;
 };
 
+enum class SkinBrush { Round, Soft, Airbrush, Smudge };
+
 struct SkinMark {
     SkinSpace space = SkinSpace::Body;
     bool stroke = false;
@@ -52,6 +54,8 @@ struct SkinMark {
     SkinColor color;
     std::vector<SkinPoint> points;
     bool clipToBib = false;
+    SkinBrush brush = SkinBrush::Round;
+    float softness = 0.65f;
 };
 
 struct SkinShape {
@@ -544,6 +548,7 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     if (const Value* rs = root.get("renderStyle"); rs && rs->type == Value::JString) {
         if (rs->s == "douni") s.renderStyle = SkinRenderStyle::Douni;
         else if (rs->s == "dazed") s.renderStyle = SkinRenderStyle::Dazed;
+        else if (rs->s == "beagle") s.renderStyle = SkinRenderStyle::Beagle;
     }
     if (const Value* ts = root.get("typingStyle"); ts && ts->type == Value::JString) {
         if (ts->s == "douni") s.typingStyle = SkinTypingStyle::Douni;
@@ -630,6 +635,13 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
                 mark.points.push_back({clampf(pt.items[0].n, -400, 400), clampf(pt.items[1].n, -400, 400)});
             }
             if (const Value* cb = m.get("clipToBib")) mark.clipToBib = (cb->type == Value::JBool && cb->b);
+            if (const Value* br = m.get("brush"); br && br->type == Value::JString) {
+                if (br->s == "soft") mark.brush = SkinBrush::Soft;
+                else if (br->s == "airbrush") mark.brush = SkinBrush::Airbrush;
+                else if (br->s == "smudge") mark.brush = SkinBrush::Smudge;
+                else mark.brush = SkinBrush::Round;
+            }
+            if (!number(c, m.get("softness"), f + ".softness", 0, 1, mark.softness)) { error = c.error; return false; }
             s.marks.push_back(std::move(mark));
         }
     }

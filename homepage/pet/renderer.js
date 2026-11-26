@@ -1305,10 +1305,28 @@
       }
 
       // Marks (stripes/polygons)
+      const bodyJawSide = jawSide(false, skin.shape.cheekFullness);
+      const headJawSide = jawSide(true, skin.shape.cheekFullness);
       for (const mk of skin.marks) {
-        if (mk.space === 'body') drawMark(ctx, mk, 'round', bodyMap);
-        else if (mk.space === 'skull') drawMark(ctx, mk, 'round', skullMap);
-        else if (mk.space === 'head') drawMark(ctx, mk, 'round', headMap);
+        if (mk.space === 'body') {
+          ctx.save();
+          drawPolyline(ctx, bodyJawSide, true, headMap);
+          ctx.clip();
+          drawMark(ctx, mk, 'round', bodyMap);
+          ctx.restore();
+        } else if (mk.space === 'skull' || mk.space === 'head') {
+          const skipJawClip = mk.clipToBib || (mk.space === 'head' && mk.kind !== 'stroke' && mk.color && Math.abs(mk.color.r - 242 / 255) < 0.01 && Math.abs(mk.color.g - 238 / 255) < 0.01 && Math.abs(mk.color.b - 228 / 255) < 0.01 && mk.points.some((pt) => Math.abs(pt[0]) > 46));
+          const mapFn = mk.space === 'skull' ? skullMap : headMap;
+          if (skipJawClip) {
+            drawMark(ctx, mk, 'round', mapFn);
+          } else {
+            ctx.save();
+            drawPolyline(ctx, headJawSide, true, headMap);
+            ctx.clip();
+            drawMark(ctx, mk, 'round', mapFn);
+            ctx.restore();
+          }
+        }
       }
 
       ctx.restore();
@@ -1741,7 +1759,7 @@
     };
   }
 
-  function drawLimb(ctx, start, control, end, startW, endW, outlineOnLeft, outlineAlpha, skin, frontPaw = false) {
+  function drawLimb(ctx, start, control, end, startW, endW, outlineOnLeft, outlineAlpha, skin, frontPaw = false, outlineOnly = false) {
     const pal = skin.palette;
     const steps = 14;
     const leftEdge = [], rightEdge = [];
@@ -1774,6 +1792,30 @@
     const pawR = endW * 0.58;
     const lineColor = pal.outline || pal.crease;
 
+    if (outlineOnly) {
+      if (!stateWhiteOutline) return;
+      ctx.save();
+      ctx.strokeStyle = WHITE_OUTLINE_CSS;
+      ctx.lineWidth = WHITE_OUTLINE_W * 2.0;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(leftEdge[0].x, leftEdge[0].y);
+      for (let i = 1; i < leftEdge.length; i++) ctx.lineTo(leftEdge[i].x, leftEdge[i].y);
+      ctx.moveTo(rightEdge[0].x, rightEdge[0].y);
+      for (let i = 1; i < rightEdge.length; i++) ctx.lineTo(rightEdge[i].x, rightEdge[i].y);
+      ctx.stroke();
+      ctx.beginPath();
+      if (isDazedSkin(skin)) {
+        ctx.ellipse(end.x, end.y, pawR * 1.28, pawR * (0.85 + 0.46), 0, 0, Math.PI * 2);
+      } else {
+        ctx.ellipse(end.x, end.y, pawR, pawR * 0.85, 0, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
     if (isDazedSkin(skin)) {
       const pawRect = {
         x: end.x - pawR * 1.28,
@@ -1795,24 +1837,6 @@
     }
 
     ctx.save();
-    if (stateWhiteOutline) {
-      ctx.save();
-      ctx.strokeStyle = WHITE_OUTLINE_CSS;
-      ctx.lineWidth = WHITE_OUTLINE_W * 2.0;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      const rimStart = isClassicBlackRim(skin) ? 2 : 4;
-      ctx.beginPath();
-      ctx.moveTo(leftEdge[rimStart].x, leftEdge[rimStart].y);
-      for (let i = rimStart + 1; i < leftEdge.length; i++) ctx.lineTo(leftEdge[i].x, leftEdge[i].y);
-      ctx.moveTo(rightEdge[rimStart].x, rightEdge[rimStart].y);
-      for (let i = rimStart + 1; i < rightEdge.length; i++) ctx.lineTo(rightEdge[i].x, rightEdge[i].y);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.ellipse(end.x, end.y, pawR, pawR * 0.85, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
     if (pal.points) {
       const mid = pal.pointsMid || pal.points;
       ctx.save();
@@ -1889,15 +1913,16 @@
     ctx.restore();
   }
 
-  function drawIdleFrontLeg(ctx, top, bottom, isLeft, skin) {
+  function drawIdleFrontLeg(ctx, top, bottom, isLeft, skin, outlineOnly = false) {
     if (isDazedSkin(skin)) {
       const sign = isLeft ? -1 : 1;
       const shoulder = { x: top.x + sign * 4.0, y: top.y - 10.0 };
       const elbow = { x: top.x + sign * 11.0, y: top.y + 1.0 };
       const paw = { x: top.x + sign * 10.0, y: top.y + 15.0 };
-      drawLimb(ctx, shoulder, elbow, paw, 19.0, 14.0, !isLeft, 0.78, skin, true);
+      drawLimb(ctx, shoulder, elbow, paw, 19.0, 14.0, !isLeft, 0.78, skin, true, outlineOnly);
       return;
     }
+    if (outlineOnly) return;
     const pal = skin.palette;
     const sign = isLeft ? -1 : 1;
     ctx.save();
@@ -1973,7 +1998,7 @@
     ctx.restore();
   }
 
-  function drawFrontPaws(ctx, seatX, seatY, breath, state, skin) {
+  function drawFrontPaws(ctx, seatX, seatY, breath, state, skin, outlineOnly = false) {
     const bd = getBuild(skin);
     const bw = skin.shape.bodyWidth;
     const lie = clamp(state.lieIntensity || 0, 0, 1);
@@ -2001,19 +2026,19 @@
     const rDist = Math.hypot(rPos.x - RIGHT_PAW_REST.x, rPos.y - RIGHT_PAW_REST.y);
 
     if (lDist < 6.0 && !state.leftPawActive) {
-      if (lieS < 0.78) drawIdleFrontLeg(ctx, { x: seatX - idleTopX, y: idleTopY }, { x: seatX - idleBotX, y: idleBotY }, true, skin);
+      if (lieS < 0.78) drawIdleFrontLeg(ctx, { x: seatX - idleTopX, y: idleTopY }, { x: seatX - idleBotX, y: idleBotY }, true, skin, outlineOnly);
     } else {
       const ls = shoulder(-shX);
       const mid = { x: (ls.x + lPos.x) * 0.5 - 6, y: (ls.y + lPos.y) * 0.5 - 6 };
-      drawLimb(ctx, ls, mid, lPos, bd.limbStartW, bd.limbEndW, false, 0.78, skin, true);
+      drawLimb(ctx, ls, mid, lPos, bd.limbStartW, bd.limbEndW, false, 0.78, skin, true, outlineOnly);
     }
 
     if (rDist < 6.0 && !state.rightPawActive) {
-      if (lieS < 0.78) drawIdleFrontLeg(ctx, { x: seatX + idleTopX, y: idleTopY }, { x: seatX + idleBotX, y: idleBotY }, false, skin);
+      if (lieS < 0.78) drawIdleFrontLeg(ctx, { x: seatX + idleTopX, y: idleTopY }, { x: seatX + idleBotX, y: idleBotY }, false, skin, outlineOnly);
     } else {
       const rs = shoulder(shX);
       const mid = { x: (rs.x + rPos.x) * 0.5 + 4, y: (rs.y + rPos.y) * 0.5 - 6 };
-      drawLimb(ctx, rs, mid, rPos, bd.limbStartW, bd.limbEndW, true, 0.78, skin, true);
+      drawLimb(ctx, rs, mid, rPos, bd.limbStartW, bd.limbEndW, true, 0.78, skin, true, outlineOnly);
     }
   }
 
@@ -5489,7 +5514,7 @@
     const fallAngle = -dizzyFall * 1.46 + Math.sin(state.time * 9.5) * 0.16 * preWobble;
     const fallShiftX = dizzyFall * 56.0;
     const fallShiftY = dizzyFall * 20.0;
-    const tailInFront = (state.tailTyping || 0) >= 0.5 || lieS >= 0.45;
+    const tailInFront = (state.tailTyping || 0) > 0.05 || lieS >= 0.45;
 
     ctx.save();
     if (Math.abs(fallAngle) > 0.001 || Math.abs(fallShiftX) > 0.1 || Math.abs(fallShiftY) > 0.1) {
@@ -5508,12 +5533,22 @@
       ctx.restore();
     };
 
+    const drawHindFootLayer = (outlineOnly) => {
+      if (state.hindFootActive <= 0.03 || dizzy >= 0.45 || lie >= 0.45) return;
+      const hip = { x: seatX + 26 * skin.shape.bodyWidth, y: seatY + 2 };
+      const target = state.hindFoot;
+      const mid = { x: (hip.x + target.x) * 0.5 + 10, y: (hip.y + target.y) * 0.5 - 8 };
+      drawLimb(ctx, hip, mid, target, 15.0, 12.0, true, 0.85 * state.hindFootActive, skin, false, outlineOnly);
+    };
+
     // Pass 1: Universal sticker-style outer white outline for ALL skins
-    // Outline connected parts before fills so the foreground sleeping tail root has no white seam (synced with KuroCat PR #22)
+    // Outline connected parts before fills so the foreground sleeping tail root and reaching shoulders have no white seam (synced with KuroCat PR #22)
     if (stateWhiteOutline) {
       drawTail(ctx, seatX, seatY, state, skin, true);
       drawEarsLayer(true);
       drawUnifiedSilhouette(ctx, seatX, seatY, headCenter, breath, state, skin, true);
+      drawHindFootLayer(true);
+      drawFrontPaws(ctx, seatX, seatY, breath, state, skin, true);
     }
 
     if (isDazedSkin(skin)) {
@@ -5532,12 +5567,7 @@
 
     drawUnifiedSilhouette(ctx, seatX, seatY, headCenter, breath, state, skin, false);
 
-    if (state.hindFootActive > 0.03 && dizzy < 0.45 && lie < 0.45) {
-      const hip = { x: seatX + 26 * skin.shape.bodyWidth, y: seatY + 2 };
-      const target = state.hindFoot;
-      const mid = { x: (hip.x + target.x) * 0.5 + 10, y: (hip.y + target.y) * 0.5 - 8 };
-      drawLimb(ctx, hip, mid, target, 15.0, 12.0, true, 0.85 * state.hindFootActive, skin);
-    }
+    drawHindFootLayer(false);
 
     // Front arms/paws emerge from shoulders underneath neck accessories (collar/scarf/bowtie)
     drawFrontPaws(ctx, seatX, seatY, breath, state, skin);

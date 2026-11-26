@@ -13,7 +13,7 @@
   <link rel="canonical" href="{{canonical}}" />
   <link rel="alternate" hreflang="zh-CN" href="https://kurocat.cc/" />
   <link rel="alternate" hreflang="en" href="https://kurocat.cc/en/" />
-  <link rel="alternate" hreflang="x-default" href="https://kurocat.cc/en/" />
+  <link rel="alternate" hreflang="x-default" href="https://kurocat.cc/" />
 
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="KuroCat" />
@@ -37,7 +37,6 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/favicon-192.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png" />
 
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="stylesheet" href="{{base}}site.css?v={{build}}" />
   <script>
     document.documentElement.classList.add('js');
@@ -46,8 +45,8 @@
   </script>
   <script type="importmap">
   { "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      "three": "/vendor/three/three.module.min.js",
+      "three/addons/": "/vendor/three/"
   } }
   </script>
   <script type="application/ld+json">
@@ -525,7 +524,7 @@
   <script src="{{base}}pet/renderer.js?v={{build}}"></script>
   <script src="{{base}}pet/web-pet.js?v={{build}}"></script>
   <script src="{{base}}site.js?v={{build}}" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js" defer></script>
+  <script src="{{base}}vendor/gsap/gsap.min.js" defer></script>
+  <script src="{{base}}vendor/gsap/ScrollTrigger.min.js" defer></script>
 </body>
 </html>

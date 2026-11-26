@@ -22,8 +22,12 @@ using std::max;
 #include <objidl.h>
 #include <gdiplus.h>
 #include <wtsapi32.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <endpointvolume.h>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <cmath>
 #include <cwchar>
 #include "KeyMap.hpp"
@@ -58,7 +62,7 @@ inline const wchar_t* trW(const wchar_t* zh, const wchar_t* en, const wchar_t* p
 
 namespace {
 
-constexpr const wchar_t* APP_VERSION = L"1.4.7";
+constexpr const wchar_t* APP_VERSION = L"1.5.1";
 constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray owner window so newer builds can take over older ones
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
@@ -145,7 +149,30 @@ enum MenuCmd : UINT {
 };
 constexpr const wchar_t* DRESSING_ROOM_CLASS = L"KuroCatDressingRoomClass";
 constexpr const wchar_t* SETTINGS_WINDOW_CLASS = L"KuroCatSettingsWindowClass";
+constexpr const wchar_t* UPDATE_WINDOW_CLASS = L"KuroCatUpdateWindowClass";
 constexpr int IDC_DRESSING_CHOOSE = 11;
+
+struct UpdateCheckResult {
+    bool ok = false;
+    bool manual = false;
+    bool hasUpdate = false;
+    std::wstring latestTag;
+    std::wstring releaseUrl;
+};
+
+struct UpdateDownloadResult {
+    bool ok = false;
+    std::wstring newExePath;
+    std::wstring targetExePath;
+};
+
+enum class UpdateDialogKind {
+    None,
+    UpdateAvailable,
+    UpToDate,
+    CheckFailed,
+    DownloadFailed
+};
 
 struct AppState {
     HWND hwnd = nullptr;
@@ -206,6 +233,20 @@ struct AppState {
     std::wstring availableUpdateVersion;
     std::wstring availableUpdateUrl;
     bool isUpdating = false;
+    bool isManualUpdateCheck = false;
+    HWND updateWnd = nullptr;
+    HFONT updateFont = nullptr;
+    HFONT updateBoldFont = nullptr;
+    HFONT updateHeadingFont = nullptr;
+    HBRUSH updateBgBrush = nullptr;
+    bool updateDark = false;
+    bool updateIsWarning = false;
+    int updateDefaultBtnId = IDOK;
+    bool replacingUpdateWnd = false;
+    UpdateDialogKind updateDialogKind = UpdateDialogKind::None;
+    std::wstring updateDialogUrl;
+    UpdateCheckResult* pendingUpdateCheck = nullptr;
+    UpdateDownloadResult* pendingUpdateDownload = nullptr;
 
     // Robustness against games, Win+L, sleep and display changes
     double nextFrameTime = 0.0;
@@ -401,14 +442,6 @@ bool hasVisibleWindowAbove(HWND hwnd) {
 }
 
 // MARK: - Auto Update Checker (GitHub Releases via WinHTTP)
-
-struct UpdateCheckResult {
-    bool ok = false;
-    bool manual = false;
-    bool hasUpdate = false;
-    std::wstring latestTag;
-    std::wstring releaseUrl;
-};
 
 std::string extractJsonStringField(const std::string& json, const char* fieldName) {
     std::string key = std::string("\"") + fieldName + "\"";
@@ -628,21 +661,16 @@ DWORD WINAPI updateCheckThreadProc(LPVOID param) {
     return 0;
 }
 
-void startAsyncUpdateCheck(HWND notifyHwnd, bool manual, int delayMs = 0) {
+bool startAsyncUpdateCheck(HWND notifyHwnd, bool manual, int delayMs = 0) {
     auto* params = new UpdateCheckThreadParams{ notifyHwnd, manual, delayMs };
     HANDLE hThread = CreateThread(nullptr, 0, updateCheckThreadProc, params, 0, nullptr);
     if (hThread) {
         CloseHandle(hThread);
-    } else {
-        delete params;
+        return true;
     }
+    delete params;
+    return false;
 }
-
-struct UpdateDownloadResult {
-    bool ok = false;
-    std::wstring newExePath;
-    std::wstring targetExePath;
-};
 
 bool launchProcessArgs(const std::wstring& exePath, const std::wstring& args) {
     std::wstring cmdLine = L"\"" + exePath + L"\"";
@@ -809,7 +837,16 @@ void applyWindowScaleAndPosition(AppState& app, bool anchorBottomCenter, bool pe
         computeDefaultOrigin(newW, newH, x, y);
     }
 
-    HWND insertAfter = app.settings.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST;
+    bool updateBlockingTopmost = (app.updateWnd && IsWindow(app.updateWnd) && IsWindowVisible(app.updateWnd) && !IsIconic(app.updateWnd));
+    bool wantTopmost = app.settings.alwaysOnTop
+        && !(app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop)
+        && !(app.dressingRoom && IsWindowVisible(app.dressingRoom) && !IsIconic(app.dressingRoom))
+        && !updateBlockingTopmost;
+    HWND insertAfter = wantTopmost ? HWND_TOPMOST : (updateBlockingTopmost ? app.updateWnd : HWND_NOTOPMOST);
+    if (updateBlockingTopmost && (GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
     SetWindowPos(app.hwnd, insertAfter, x, y, newW, newH, SWP_NOACTIVATE);
     if (persist) {
         app.settings.posX = x;
@@ -818,14 +855,42 @@ void applyWindowScaleAndPosition(AppState& app, bool anchorBottomCenter, bool pe
     }
 }
 
+bool shouldCatBeTopmost(const AppState& app) {
+    if (!app.settings.alwaysOnTop) return false;
+    if (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop) return false;
+    if (app.dressingRoom && IsWindowVisible(app.dressingRoom) && !IsIconic(app.dressingRoom)) return false;
+    if (app.updateWnd && IsWindow(app.updateWnd) && IsWindowVisible(app.updateWnd) && !IsIconic(app.updateWnd)) return false;
+    return true;
+}
+
 /// Puts the cat back on top of other topmost windows (borderless/fullscreen games that make
 /// themselves topmost after launching used to bury the cat, which looked like it "vanished").
 void assertTopmost(AppState& app) {
-    if (!app.hwnd || !app.isVisible || app.hiddenByFullscreen || !app.settings.alwaysOnTop) return;
-    if (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop) return;
-    if (app.dressingRoom && IsWindowVisible(app.dressingRoom)) return;
+    if (!app.hwnd || !app.isVisible || app.hiddenByFullscreen) return;
+    if (!shouldCatBeTopmost(app)) return;
     SetWindowPos(app.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+}
+
+void demoteTopmostForUpdateDialog(AppState& app) {
+    if (app.hwnd && IsWindow(app.hwnd) && (GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+    if (app.dressingRoom && IsWindow(app.dressingRoom) && (GetWindowLongPtrW(app.dressingRoom, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(app.dressingRoom, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+}
+
+void restoreTopmostAfterUpdateDialog(AppState& app) {
+    if (app.hwnd && IsWindow(app.hwnd) && app.isVisible && !app.hiddenByFullscreen && shouldCatBeTopmost(app)) {
+        assertTopmost(app);
+    }
+    if (app.dressingRoom && IsWindow(app.dressingRoom) && IsWindowVisible(app.dressingRoom)) {
+        SetWindowPos(app.dressingRoom, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
 }
 
 /// Full self-repair after Win+L unlock, sleep/resume, display-mode changes (games switching
@@ -857,12 +922,172 @@ void recoverAfterSystemEvent(AppState& app) {
     app.pendingTopmostTime = now + 1.5; // some games re-assert topmost shortly after a mode switch
 }
 
+/// Returns true when any active audio output endpoint (speakers, 3.5mm/USB/Bluetooth headphones)
+/// currently has a non-system application outputting audible audio (videos, browsers, Apple Music,
+/// music players, etc.). Uses WASAPI endpoint enumeration + AudioSessionState + IAudioMeterInformation,
+/// with a safe fallback for Win11 Bluetooth A2DP / hardware-offloaded endpoints whose GetPeakValue()
+/// reports 0.0f while audio is actively playing.
+static bool isSystemAudioPlaying() {
+    static std::unordered_set<std::wstring> s_meterWorkingDevices;
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+    bool tempComInit = false;
+    if (hr == CO_E_NOTINITIALIZED) {
+        HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (SUCCEEDED(initHr)) {
+            tempComInit = true;
+            hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+        }
+    }
+    if (FAILED(hr) || !enumerator) {
+        if (tempComInit) CoUninitialize();
+        return false;
+    }
+
+    IMMDeviceCollection* collection = nullptr;
+    hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
+    enumerator->Release();
+    if (FAILED(hr) || !collection) {
+        if (tempComInit) CoUninitialize();
+        return false;
+    }
+
+    UINT devCount = 0;
+    collection->GetCount(&devCount);
+    bool found = false;
+
+    for (UINT d = 0; d < devCount && !found; ++d) {
+        IMMDevice* device = nullptr;
+        if (FAILED(collection->Item(d, &device)) || !device) continue;
+
+        std::wstring devId;
+        LPWSTR rawDevId = nullptr;
+        if (SUCCEEDED(device->GetId(&rawDevId)) && rawDevId) {
+            devId = rawDevId;
+            CoTaskMemFree(rawDevId);
+        }
+
+        // Skip muted or zero-volume output endpoints
+        bool epMuted = false;
+        float epVolume = 1.0f;
+        IAudioEndpointVolume* epVol = nullptr;
+        if (SUCCEEDED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void**)&epVol)) && epVol) {
+            BOOL muted = FALSE;
+            if (SUCCEEDED(epVol->GetMute(&muted)) && muted) epMuted = true;
+            float vol = 1.0f;
+            if (SUCCEEDED(epVol->GetMasterVolumeLevelScalar(&vol))) epVolume = vol;
+            epVol->Release();
+        }
+        if (epMuted || epVolume <= 0.001f) {
+            device->Release();
+            continue;
+        }
+
+        // Query endpoint meter without skipping when epPeak <= 0.0005f (Win11 BT A2DP / offload
+        // endpoints often return S_OK with 0.0f peak even while playing audio).
+        float epPeak = 0.0f;
+        bool hasEpMeter = false;
+        UINT epMeterChannels = 0;
+        IAudioMeterInformation* epMeter = nullptr;
+        if (SUCCEEDED(device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr, (void**)&epMeter)) && epMeter) {
+            float pk = 0.0f;
+            if (SUCCEEDED(epMeter->GetPeakValue(&pk))) {
+                epPeak = pk;
+                hasEpMeter = true;
+            }
+            epMeter->GetMeteringChannelCount(&epMeterChannels);
+            epMeter->Release();
+        }
+
+        IAudioSessionManager2* mgr = nullptr;
+        if (SUCCEEDED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr)) && mgr) {
+            IAudioSessionEnumerator* sessionEnum = nullptr;
+            if (SUCCEEDED(mgr->GetSessionEnumerator(&sessionEnum)) && sessionEnum) {
+                int count = 0;
+                sessionEnum->GetCount(&count);
+                for (int i = 0; i < count && !found; ++i) {
+                    IAudioSessionControl* ctrl = nullptr;
+                    if (FAILED(sessionEnum->GetSession(i, &ctrl)) || !ctrl) continue;
+                    AudioSessionState st = AudioSessionStateInactive;
+                    if (SUCCEEDED(ctrl->GetState(&st)) && st == AudioSessionStateActive) {
+                        bool isSystemSound = false;
+                        IAudioSessionControl2* ctrl2 = nullptr;
+                        if (SUCCEEDED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2)) && ctrl2) {
+                            if (ctrl2->IsSystemSoundsSession() == S_OK) isSystemSound = true;
+                            ctrl2->Release();
+                        }
+                        bool sessionMuted = false;
+                        float sessionVolume = 1.0f;
+                        ISimpleAudioVolume* sVol = nullptr;
+                        if (SUCCEEDED(ctrl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&sVol)) && sVol) {
+                            BOOL sm = FALSE;
+                            if (SUCCEEDED(sVol->GetMute(&sm)) && sm) sessionMuted = true;
+                            float sv = 1.0f;
+                            if (SUCCEEDED(sVol->GetMasterVolume(&sv))) sessionVolume = sv;
+                            sVol->Release();
+                        }
+                        if (!isSystemSound && !sessionMuted && sessionVolume > 0.001f) {
+                            float sPeak = 0.0f;
+                            bool hasSessionPeak = false;
+                            IAudioMeterInformation* sMeter = nullptr;
+                            if (SUCCEEDED(ctrl->QueryInterface(__uuidof(IAudioMeterInformation), (void**)&sMeter)) && sMeter) {
+                                if (SUCCEEDED(sMeter->GetPeakValue(&sPeak))) {
+                                    hasSessionPeak = true;
+                                }
+                                sMeter->Release();
+                            }
+                            if (hasSessionPeak && sPeak > 0.0008f) {
+                                if (!devId.empty()) s_meterWorkingDevices.insert(devId);
+                                found = true;
+                            } else if (hasEpMeter && epPeak > 0.001f && !hasSessionPeak) {
+                                found = true;
+                            } else if (!hasEpMeter || epMeterChannels == 0 || !hasSessionPeak ||
+                                       devId.empty() || s_meterWorkingDevices.find(devId) == s_meterWorkingDevices.end()) {
+                                // Endpoint meter has never reported non-zero session peaks (e.g. Win11 Bluetooth A2DP
+                                // / hardware-offloaded stream) or metering is unavailable: trust active unmuted session.
+                                found = true;
+                            }
+                        }
+                    }
+                    ctrl->Release();
+                }
+                sessionEnum->Release();
+            }
+            mgr->Release();
+        }
+        device->Release();
+    }
+    collection->Release();
+    if (tempComInit) CoUninitialize();
+    return found;
+}
+
 /// Twice per second: watchdog, fullscreen auto-hide, topmost re-assert, and UIPI detection.
 void housekeeping(AppState& app) {
     double now = nowSeconds();
     if (now < app.nextHousekeepingTime) return;
     app.nextHousekeepingTime = now + 0.5;
     if (!app.hwnd) return;
+
+    // Poll active system audio sessions every ~0.8s; require >= 1.2s sustained audio to ignore brief dings
+    static double s_nextMusicCheck = 0.0;
+    static double s_audioSustainedSince = 0.0;
+    if (!app.settings.autoHeadphonesOnMusic) {
+        s_audioSustainedSince = 0.0;
+        app.physics.isMusicPlaying = false;
+    } else if (now >= s_nextMusicCheck) {
+        s_nextMusicCheck = now + 0.8;
+        if (isSystemAudioPlaying()) {
+            if (s_audioSustainedSince == 0.0) s_audioSustainedSince = now;
+            app.physics.isMusicPlaying = (now - s_audioSustainedSince) >= 1.2;
+        } else {
+            s_audioSustainedSince = 0.0;
+            app.physics.isMusicPlaying = false;
+        }
+    }
 
     bool fullscreenFg = isForegroundFullscreen(app.hwnd);
     bool obsBg = (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop);
@@ -1419,18 +1644,27 @@ void showDressingRoom(AppState& app) {
         registered = RegisterClassExW(&wc) != 0;
     }
     HDC screen = GetDC(nullptr);
-    app.dressingScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
+    float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
-    float k = app.dressingScale;
-    auto px = [&](float v) { return (int)std::lround(v * k); };
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, exStyle = WS_EX_TOPMOST | WS_EX_ACCEPTFILES;
+    RECT frameRc = { 0, 0, 0, 0 };
+    AdjustWindowRectEx(&frameRc, style, FALSE, exStyle);
+    int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int maxClientW = std::max(280, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(240, (int)(work.bottom - work.top) - frameH - 24);
+    float k = std::min({ dpiScale, (float)maxClientW / dressing::W, (float)maxClientH / dressing::H });
+    if (k < 0.65f) k = 0.65f;
+    app.dressingScale = k;
+    auto px = [&](float v) { return (int)std::lround(v * k); };
     RECT rc = {0, 0, px(dressing::W), px(dressing::H)};
     AdjustWindowRectEx(&rc, style, FALSE, exStyle);
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
-    RECT work = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int posX = std::max((int)work.left, (int)(work.left + work.right - w) / 2);
+    int posY = std::max((int)work.top, (int)(work.top + work.bottom - h) / 2);
     HWND win = CreateWindowExW(exStyle, DRESSING_ROOM_CLASS, trW(L"换装间", L"Dressing Room", L"Provador"), style,
-        (work.left + work.right - w) / 2, (work.top + work.bottom - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
+        posX, posY, w, h, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.dressingRoom = win;
     allowDropsWhenElevated(win);
@@ -1638,6 +1872,7 @@ enum CtrlId : int {
     ID_TABLET_COMBO,
     ID_CHK_TOPMOST,
     ID_CHK_AUTOHIDE_FS,
+    ID_CHK_AUTO_HEADPHONES,
     ID_CHK_CLICKTHROUGH,
     ID_CHK_AUTOSTART,
     ID_CHK_RUN_ADMIN,
@@ -1779,6 +2014,7 @@ void rebuildCombosAndSync(AppState& app) {
     setChk(ID_CHK_LEVEL_KEYBOARD, app.settings.levelKeyboard);
     setChk(ID_CHK_TOPMOST, app.settings.alwaysOnTop);
     setChk(ID_CHK_AUTOHIDE_FS, app.settings.autoHideFullscreen);
+    setChk(ID_CHK_AUTO_HEADPHONES, app.settings.autoHeadphonesOnMusic);
     setChk(ID_CHK_CLICKTHROUGH, app.settings.fullClickThrough);
     setChk(ID_CHK_AUTOSTART, isAutoStartEnabled());
     setChk(ID_CHK_RUN_ADMIN, app.settings.runAsAdmin);
@@ -2152,6 +2388,11 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                         }
                         app->nextHousekeepingTime = 0.0;
                         break;
+                    case ID_CHK_AUTO_HEADPHONES:
+                        app->settings.autoHeadphonesOnMusic = isChk(id);
+                        if (!app->settings.autoHeadphonesOnMusic) app->physics.isMusicPlaying = false;
+                        app->settings.saveToRegistry();
+                        break;
                     case ID_CHK_CLICKTHROUGH:
                         app->settings.fullClickThrough = isChk(id);
                         app->settings.saveToRegistry();
@@ -2244,8 +2485,20 @@ void showSettingsWindow(AppState& app) {
     }
 
     HDC screen = GetDC(nullptr);
-    float k = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
+    float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
+
+    const int W = 540, H = 740;
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT frameRc = { 0, 0, 0, 0 };
+    AdjustWindowRectEx(&frameRc, style, FALSE, 0);
+    int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int maxClientW = std::max(320, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(360, (int)(work.bottom - work.top) - frameH - 24);
+    float k = std::min({ dpiScale, (float)maxClientW / (float)W, (float)maxClientH / (float)H });
+    if (k < 0.65f) k = 0.65f;
     auto px = [&](int v) { return (int)std::lround(v * k); };
 
     app.settingsDark = settings_ui::isWindowsDarkMode();
@@ -2257,16 +2510,14 @@ void showSettingsWindow(AppState& app) {
 
     auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
 
-    const int W = 540, H = 710;
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     RECT rc = { 0, 0, px(W), px(H) };
     AdjustWindowRectEx(&rc, style, FALSE, 0);
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
-    RECT work = {};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int posX = std::max((int)work.left, (int)(work.left + work.right - winW) / 2);
+    int posY = std::max((int)work.top, (int)(work.top + work.bottom - winH) / 2);
     HWND win = CreateWindowExW(0, SETTINGS_WINDOW_CLASS,
         tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings", L"Configurações do KuroCat"), style,
-        (work.left + work.right - winW) / 2, (work.top + work.bottom - winH) / 2,
+        posX, posY,
         winW, winH, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.settingsWnd = win;
@@ -2343,7 +2594,7 @@ void showSettingsWindow(AppState& app) {
     SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse", L"Sempre mostrar mouse"));
 
     // Section 3: Window & System
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System", L"Janela e sistema"), BS_GROUPBOX, 14, 502, 512, 194, 0, true);
+    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System", L"Janela e sistema"), BS_GROUPBOX, 14, 502, 512, 224, 0, true);
     addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top", L"Sempre no topo"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
     addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen", L"Ocultar em apps de tela cheia"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
     addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)", L"Ignorar cliques (segure Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
@@ -2352,25 +2603,438 @@ void showSettingsWindow(AppState& app) {
     addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin", L"✓ Em modo admin")
                                       : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin", L"Reiniciar como admin"),
             BS_PUSHBUTTON | WS_TABSTOP, 276, 582, 148, 24, ID_BTN_RELAUNCH_ADMIN);
+    addCtrl(L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A\uFF08\u97F3\u4E50/\u5A92\u4F53\u64AD\u653E\u5668\uFF09", L"Auto Headphones on Music", L"Fones automáticos ao ouvir música"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 612, 340, 22, ID_CHK_AUTO_HEADPHONES);
 
-    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture", L"Captura OBS"), SS_LEFT, 28, 618, 78, 20, 0);
-    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 614, 210, 120, ID_OBS_COMBO);
+    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture", L"Captura OBS"), SS_LEFT, 28, 646, 78, 20, 0);
+    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 642, 210, 120, ID_OBS_COMBO);
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)", L"Desligado (normal)"));
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)", L"OBS transparente (WGC)"));
     SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)", L"OBS tela verde (universal)"));
-    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop", L"Ocultar na tela"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 616, 180, 22, ID_CHK_OBS_HIDE);
+    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop", L"Ocultar na tela"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 644, 180, 22, ID_CHK_OBS_HIDE);
 
-    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language", L"Idioma"), SS_LEFT, 28, 652, 78, 20, 0);
-    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 648, 150, 110, ID_LANG_COMBO);
+    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language", L"Idioma"), SS_LEFT, 28, 680, 78, 20, 0);
+    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 676, 150, 110, ID_LANG_COMBO);
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
     SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"Português");
-    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta de skins"), BS_PUSHBUTTON | WS_TABSTOP, 270, 648, 116, 24, ID_BTN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir", L"Pasta de teclados"), BS_PUSHBUTTON | WS_TABSTOP, 392, 648, 120, 24, ID_BTN_KB_DIR);
+    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta de skins"), BS_PUSHBUTTON | WS_TABSTOP, 270, 676, 116, 24, ID_BTN_SKINS_DIR);
+    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir", L"Pasta de teclados"), BS_PUSHBUTTON | WS_TABSTOP, 392, 676, 120, 24, ID_BTN_KB_DIR);
 
     settings_ui::rebuildCombosAndSync(app);
     ShowWindow(win, SW_SHOWNORMAL);
     SetForegroundWindow(win);
+}
+
+namespace update_ui {
+constexpr int ID_UPD_HEADING   = 3001;
+constexpr int ID_UPD_BODY      = 3002;
+constexpr int ID_UPD_SECONDARY = 3003;
+#ifndef DM_GETDEFID
+#define DM_GETDEFID (WM_USER + 0)
+#endif
+#ifndef DC_HASDEFID
+#define DC_HASDEFID 0x534B
+#endif
+
+float monitorDpiScale(HMONITOR mon) {
+    if (mon) {
+        if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+            using GetDpiForMonFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+            auto fn = (GetDpiForMonFn)(void*)GetProcAddress(shcore, "GetDpiForMonitor");
+            UINT dx = 96, dy = 96;
+            bool ok = (fn && SUCCEEDED(fn(mon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dy > 0);
+            FreeLibrary(shcore);
+            if (ok) return (float)dy / 96.0f;
+        }
+    }
+    HDC screen = GetDC(nullptr);
+    float s = screen ? (GetDeviceCaps(screen, LOGPIXELSY) / 96.0f) : 1.0f;
+    if (screen) ReleaseDC(nullptr, screen);
+    return s > 0.0f ? s : 1.0f;
+}
+
+int measureTextWidth(HWND refWnd, HFONT font, const std::wstring& text) {
+    if (text.empty()) return 0;
+    HDC screen = GetDC(refWnd);
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ oldF = mem ? SelectObject(mem, font) : nullptr;
+    RECT rc = { 0, 0, 0, 0 };
+    if (mem) {
+        DrawTextW(mem, text.c_str(), (int)text.size(), &rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(mem, oldF);
+        DeleteDC(mem);
+    }
+    if (screen) ReleaseDC(refWnd, screen);
+    return (int)(rc.right - rc.left);
+}
+
+int measureWrappedTextHeight(HWND refWnd, HFONT font, const std::wstring& text, int widthPx) {
+    if (text.empty()) return 0;
+    HDC screen = GetDC(refWnd);
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ oldF = mem ? SelectObject(mem, font) : nullptr;
+    RECT rc = { 0, 0, std::max(40, widthPx), 0 };
+    if (mem) {
+        DrawTextW(mem, text.c_str(), (int)text.size(), &rc,
+                  DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+        SelectObject(mem, oldF);
+        DeleteDC(mem);
+    }
+    if (screen) ReleaseDC(refWnd, screen);
+    return std::max(16, (int)(rc.bottom - rc.top));
+}
+
+void cleanupGdiResources(AppState& app) {
+    if (app.updateFont) { DeleteObject(app.updateFont); app.updateFont = nullptr; }
+    if (app.updateBoldFont) { DeleteObject(app.updateBoldFont); app.updateBoldFont = nullptr; }
+    if (app.updateHeadingFont) { DeleteObject(app.updateHeadingFont); app.updateHeadingFont = nullptr; }
+    if (app.updateBgBrush) { DeleteObject(app.updateBgBrush); app.updateBgBrush = nullptr; }
+}
+} // namespace update_ui
+
+LRESULT CALLBACK updateWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    AppState* app = g_app;
+    switch (msg) {
+        case WM_ERASEBKGND:
+            if (app && app->updateBgBrush) {
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+                FillRect((HDC)wParam, &rc, app->updateBgBrush);
+                return TRUE;
+            }
+            break;
+        case WM_CTLCOLORSTATIC:
+            if (app && app->updateBgBrush) {
+                HDC hdc = (HDC)wParam;
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, app->updateDark ? RGB(236, 238, 242) : RGB(28, 30, 34));
+                return (LRESULT)app->updateBgBrush;
+            }
+            break;
+        case WM_PAINT: {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (app) {
+                HDC screen = GetDC(hwnd);
+                float dpi = screen ? (GetDeviceCaps(screen, LOGPIXELSY) / 96.0f) : 1.0f;
+                if (screen) ReleaseDC(hwnd, screen);
+                int icoSz = std::max(24, (int)std::lround(36.0f * dpi));
+                int icoX = std::max(14, (int)std::lround(20.0f * dpi));
+                int icoY = std::max(14, (int)std::lround(20.0f * dpi));
+                LPCWSTR iconId = app->updateIsWarning ? IDI_WARNING : IDI_INFORMATION;
+                HICON hIco = (HICON)LoadImageW(nullptr, iconId, IMAGE_ICON, icoSz, icoSz, LR_SHARED);
+                if (!hIco) hIco = LoadIconW(nullptr, iconId);
+                if (hIco) {
+                    DrawIconEx(hdc, icoX, icoY, hIco, icoSz, icoSz, 0, nullptr, DI_NORMAL);
+                }
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case DM_GETDEFID:
+            if (app) return MAKELRESULT((WORD)app->updateDefaultBtnId, DC_HASDEFID);
+            break;
+        case WM_COMMAND: {
+            if (!app) return 0;
+            int id = LOWORD(wParam);
+            if (id == IDOK) {
+                UpdateDialogKind kind = app->updateDialogKind;
+                std::wstring url = app->updateDialogUrl.empty() ? UPDATE_PAGE_URL : app->updateDialogUrl;
+                if (kind == UpdateDialogKind::UpdateAvailable) {
+                    app->settings.suppressAutoUpdatePrompt = false;
+                    app->settings.saveToRegistry();
+                    DestroyWindow(hwnd);
+                    startInAppUpdate(*app);
+                } else if (kind == UpdateDialogKind::DownloadFailed) {
+                    DestroyWindow(hwnd);
+                    ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                } else {
+                    DestroyWindow(hwnd);
+                }
+                return 0;
+            }
+            if (id == update_ui::ID_UPD_SECONDARY) {
+                std::wstring url = app->updateDialogUrl.empty() ? UPDATE_PAGE_URL : app->updateDialogUrl;
+                DestroyWindow(hwnd);
+                ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                return 0;
+            }
+            if (id == IDCANCEL) {
+                if (app->updateDialogKind == UpdateDialogKind::UpdateAvailable) {
+                    app->settings.suppressAutoUpdatePrompt = true;
+                    app->settings.saveToRegistry();
+                }
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            if (app && app->updateWnd == hwnd) {
+                app->updateWnd = nullptr;
+                app->updateDialogKind = UpdateDialogKind::None;
+                app->updateDialogUrl.clear();
+                update_ui::cleanupGdiResources(*app);
+                if (!app->replacingUpdateWnd) {
+                    restoreTopmostAfterUpdateDialog(*app);
+                }
+            }
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void showUpdateResultWindow(AppState& app,
+                            UpdateDialogKind kind,
+                            const std::wstring& title,
+                            const std::wstring& heading,
+                            const std::wstring& body,
+                            bool isWarning,
+                            bool bringToFront,
+                            const std::wstring& url,
+                            const std::wstring& primaryLabel,
+                            const std::wstring& secondaryLabel,
+                            const std::wstring& cancelLabel) {
+    if (app.updateWnd && IsWindow(app.updateWnd)) {
+        app.replacingUpdateWnd = true;
+        DestroyWindow(app.updateWnd);
+        app.replacingUpdateWnd = false;
+    }
+    update_ui::cleanupGdiResources(app);
+
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = updateWndProc;
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = UPDATE_WINDOW_CLASS;
+        registered = RegisterClassExW(&wc) != 0;
+    }
+
+    POINT curPt = {};
+    GetCursorPos(&curPt);
+    HWND fg = GetForegroundWindow();
+    HMONITOR mon = (fg && IsWindow(fg) && IsWindowVisible(fg) && fg != app.hwnd && fg != app.menuOwnerHwnd)
+        ? MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromPoint(curPt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    RECT work = {};
+    if (GetMonitorInfoW(mon, &mi)) {
+        work = mi.rcWork;
+    } else {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    }
+
+    float dpiScale = update_ui::monitorDpiScale(mon);
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT frameRc = { 0, 0, 0, 0 };
+    AdjustWindowRectEx(&frameRc, style, FALSE, 0);
+    int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
+    int maxClientW = std::max(320, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(180, (int)(work.bottom - work.top) - frameH - 24);
+    const int baseW = 472;
+    float k = std::min(dpiScale, (float)maxClientW / (float)baseW);
+    if (k < 0.65f) k = 0.65f;
+    auto px = [&](int v) { return (int)std::lround(v * k); };
+
+    app.updateDark = settings_ui::isWindowsDarkMode();
+    app.updateIsWarning = isWarning;
+    app.updateDialogKind = kind;
+    app.updateDialogUrl = url;
+    app.updateDefaultBtnId = IDOK;
+    app.updateBgBrush = CreateSolidBrush(app.updateDark ? RGB(32, 32, 36) : RGB(246, 246, 248));
+    app.updateFont = CreateFontW(-px(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.updateBoldFont = CreateFontW(-px(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.updateHeadingFont = CreateFontW(-px(15), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
+    int clientW = px(baseW);
+    int textX = px(72);
+    int textW = std::max(120, clientW - textX - px(22));
+    int headH = update_ui::measureWrappedTextHeight(nullptr, app.updateHeadingFont, heading, textW) + px(2);
+    int bodyH = update_ui::measureWrappedTextHeight(nullptr, app.updateFont, body, textW) + px(6);
+    int btnH = px(28);
+    int btnY = std::max(px(72), px(20) + headH + px(8) + bodyH + px(18));
+    int clientH = std::min(maxClientH, btnY + btnH + px(18));
+    if (clientH < btnY + btnH + px(12)) {
+        btnY = std::max(px(40), clientH - btnH - px(14));
+        bodyH = std::max(px(24), btnY - (px(20) + headH + px(8) + px(10)));
+    }
+
+    RECT rc = { 0, 0, clientW, clientH };
+    AdjustWindowRectEx(&rc, style, FALSE, 0);
+    int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
+    int posX = std::max((int)work.left, (int)(work.left + work.right - winW) / 2);
+    int posY = std::max((int)work.top, (int)(work.top + work.bottom - winH) / 2);
+
+    // Yield topmost on the cat / dressing room before showing the non-modal dialog so the
+    // dialog is never obscured by the overlay window while remaining non-topmost itself.
+    demoteTopmostForUpdateDialog(app);
+
+    HWND win = CreateWindowExW(0, UPDATE_WINDOW_CLASS, title.c_str(), style,
+        posX, posY, winW, winH, nullptr, nullptr, inst, nullptr);
+    if (!win) {
+        update_ui::cleanupGdiResources(app);
+        app.updateDialogKind = UpdateDialogKind::None;
+        app.updateDialogUrl.clear();
+        restoreTopmostAfterUpdateDialog(app);
+        return;
+    }
+    app.updateWnd = win;
+    settings_ui::applyDwmDarkTitleBar(win, app.updateDark);
+
+    HWND hHead = CreateWindowExW(0, L"STATIC", heading.c_str(),
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_EDITCONTROL | SS_NOPREFIX,
+        textX, px(20), textW, headH, win, (HMENU)(INT_PTR)update_ui::ID_UPD_HEADING, inst, nullptr);
+    if (hHead) SendMessageW(hHead, WM_SETFONT, (WPARAM)app.updateHeadingFont, TRUE);
+
+    HWND hBody = CreateWindowExW(0, L"STATIC", body.c_str(),
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_EDITCONTROL | SS_NOPREFIX,
+        textX, px(20) + headH + px(8), textW, bodyH, win, (HMENU)(INT_PTR)update_ui::ID_UPD_BODY, inst, nullptr);
+    if (hBody) SendMessageW(hBody, WM_SETFONT, (WPARAM)app.updateFont, TRUE);
+
+    int rightEdge = clientW - px(20);
+    int btnGap = px(8);
+    auto addBtn = [&](const std::wstring& label, int id, bool isDefault) {
+        if (label.empty()) return;
+        HFONT fnt = isDefault ? app.updateBoldFont : app.updateFont;
+        int measuredW = update_ui::measureTextWidth(win, fnt, label);
+        int bw = std::clamp(measuredW + px(28), px(84), px(176));
+        rightEdge -= bw;
+        HWND b = CreateWindowExW(0, L"BUTTON", label.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | (isDefault ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON),
+            rightEdge, btnY, bw, btnH, win, (HMENU)(INT_PTR)id, inst, nullptr);
+        if (b) SendMessageW(b, WM_SETFONT, (WPARAM)fnt, TRUE);
+        rightEdge -= btnGap;
+    };
+
+    // Add right-to-left: Cancel -> Secondary -> Primary
+    addBtn(cancelLabel, IDCANCEL, false);
+    addBtn(secondaryLabel, update_ui::ID_UPD_SECONDARY, false);
+    addBtn(primaryLabel, IDOK, true);
+
+    bool fullscreenFg = isForegroundFullscreen(app.hwnd);
+    bool shouldSurface = bringToFront || !fullscreenFg;
+    ShowWindow(win, SW_SHOWNOACTIVATE);
+    if (shouldSurface) {
+        // Briefly raise via HWND_TOPMOST -> HWND_NOTOPMOST so the dialog appears visibly
+        // above normal windows the user switched to, without staying permanently topmost.
+        SetWindowPos(win, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(win, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    } else {
+        SetWindowPos(win, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    if (app.hwnd && IsWindow(app.hwnd) && app.isVisible && !app.hiddenByFullscreen &&
+        !(app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop)) {
+        SetWindowPos(app.hwnd, win, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+    if (shouldSurface) {
+        AllowSetForegroundWindow(ASFW_ANY);
+        BringWindowToTop(win);
+        SetForegroundWindow(win);
+        if (GetForegroundWindow() == win) {
+            if (HWND defBtn = GetDlgItem(win, IDOK)) SetFocus(defBtn);
+        }
+    }
+}
+
+void handleUpdateCheckResult(AppState& app, const UpdateCheckResult& res) {
+    // Picks the zh / en / pt variant for the current UI language.
+    const int lang = app.settings.language;
+    auto pick = [lang](std::wstring zh, std::wstring en, std::wstring pt) { return lang == 1 ? en : lang == 2 ? pt : zh; };
+    if (res.ok && res.hasUpdate) {
+        app.availableUpdateVersion = res.latestTag;
+        app.availableUpdateUrl = res.releaseUrl;
+        if (!res.manual && app.settings.suppressAutoUpdatePrompt) return;
+
+        std::wstring title = pick(L"KuroCat 更新提醒", L"KuroCat Update Available", L"Atualização do KuroCat");
+        std::wstring heading = pick(L"发现 KuroCat 新版本 " + res.latestTag,
+                                    L"New KuroCat version " + res.latestTag + L" is available",
+                                    L"Nova versão do KuroCat: " + res.latestTag);
+        std::wstring body = pick(
+            L"当前版本：v" + std::wstring(APP_VERSION)
+                + L"\n当前运行的程序：" + currentExePath()
+                + L"\n\n如果你已经下载过新版，直接双击新版 exe 即可自动替换掉这个旧版。"
+                + L"\n\n点击「立即更新」将自动下载并更新重启；\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在右键菜单点击「检查更新」）。",
+            L"Current version: v" + std::wstring(APP_VERSION)
+                + L"\nRunning executable: " + currentExePath()
+                + L"\n\nIf you already downloaded the new version, double-click the new exe to replace this copy automatically."
+                + L"\n\nClick \"Update Now\" to download, update, and restart automatically.\nClick \"Later\" to stop automatic update prompts (you can still check manually from the menu).",
+            L"Versão atual: v" + std::wstring(APP_VERSION)
+                + L"\nPrograma em execução: " + currentExePath()
+                + L"\n\nSe você já baixou a nova versão, dê dois cliques no novo .exe para substituir esta cópia automaticamente."
+                + L"\n\nClique em \"Atualizar agora\" para baixar, atualizar e reiniciar automaticamente.\nClique em \"Depois\" para parar os avisos automáticos (você ainda pode verificar pelo menu).");
+        showUpdateResultWindow(
+            app, UpdateDialogKind::UpdateAvailable, title, heading, body, false, res.manual,
+            res.releaseUrl,
+            pick(L"立即更新", L"Update Now", L"Atualizar agora"),
+            pick(L"打开下载页", L"Download Page", L"Página de download"),
+            pick(L"暂不更新", L"Later", L"Depois"));
+    } else if (res.manual) {
+        std::wstring title = pick(L"KuroCat 检查更新", L"KuroCat Check for Updates", L"KuroCat – Verificar atualizações");
+        if (res.ok) {
+            std::wstring heading = pick(L"已是最新版本", L"You are up to date", L"Você está atualizado");
+            std::wstring body = pick(
+                L"当前版本 v" + std::wstring(APP_VERSION) + L" 已是最新版本。",
+                L"Current version v" + std::wstring(APP_VERSION) + L" is already the latest version.",
+                L"A versão atual v" + std::wstring(APP_VERSION) + L" já é a mais recente.");
+            showUpdateResultWindow(
+                app, UpdateDialogKind::UpToDate, title, heading, body, false, true,
+                UPDATE_PAGE_URL,
+                pick(L"好", L"OK", L"OK"), L"", L"");
+        } else {
+            std::wstring heading = pick(L"无法连接到更新服务器", L"Unable to check for updates", L"Não foi possível verificar atualizações");
+            std::wstring body = pick(
+                L"无法连接到更新服务器，请稍后重试或检查网络。",
+                L"Could not reach the update server. Please check your network connection and try again later.",
+                L"Não foi possível conectar ao servidor de atualizações. Verifique sua conexão e tente de novo mais tarde.");
+            showUpdateResultWindow(
+                app, UpdateDialogKind::CheckFailed, title, heading, body, true, true,
+                UPDATE_PAGE_URL,
+                pick(L"好", L"OK", L"OK"),
+                pick(L"打开下载页", L"Download Page", L"Página de download"),
+                L"");
+        }
+    }
+}
+
+void handleUpdateDownloadResult(AppState& app, const UpdateDownloadResult& res) {
+    bool launched = false;
+    if (res.ok && !res.newExePath.empty() && !res.targetExePath.empty()) {
+        std::wstring args = L"--apply-update " + std::to_wstring(GetCurrentProcessId())
+                          + L" \"" + res.targetExePath + L"\"";
+        launched = launchProcessArgs(res.newExePath, args);
+    }
+    if (launched) {
+        PostQuitMessage(0);
+        return;
+    }
+    const int lang = app.settings.language;
+    auto pick = [lang](std::wstring zh, std::wstring en, std::wstring pt) { return lang == 1 ? en : lang == 2 ? pt : zh; };
+    std::wstring url = !app.availableUpdateUrl.empty() ? app.availableUpdateUrl : UPDATE_PAGE_URL;
+    std::wstring title = pick(L"KuroCat 自动更新", L"KuroCat Auto Update", L"KuroCat – Atualização automática");
+    std::wstring heading = pick(L"自动下载或替换安装包失败", L"Automatic update failed", L"Falha na atualização automática");
+    std::wstring body = pick(
+        L"自动下载或替换安装包失败，是否打开下载页手动下载？",
+        L"Failed to download or replace the executable. Would you like to open the download page to download manually?",
+        L"Falha ao baixar ou substituir o executável. Quer abrir a página de download para baixar manualmente?");
+    showUpdateResultWindow(
+        app, UpdateDialogKind::DownloadFailed, title, heading, body, true, true,
+        url,
+        pick(L"打开下载页", L"Open Download Page", L"Abrir página de download"),
+        L"",
+        pick(L"取消", L"Cancel", L"Cancelar"));
 }
 
 void showContextMenu(AppState& app, POINT screenPt) {
@@ -2469,6 +3133,9 @@ void showContextMenu(AppState& app, POINT screenPt) {
             ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ", L"⏳ Baixando atualização ")) + app.availableUpdateVersion + L"...")
             : (std::wstring(tr(L"\U0001F195 \u53D1\u73B0\u65B0\u7248\u672C ", L"\U0001F195 Update Available ", L"🆕 Nova versão ")) + app.availableUpdateVersion);
         AppendMenuW(menu, MF_STRING | (app.isUpdating ? MF_GRAYED : 0), CMD_OPEN_UPDATE, upTxt.c_str());
+    } else if (app.isManualUpdateCheck) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, CMD_CHECK_UPDATE,
+            tr(L"\u23F3 \u6B63\u5728\u68C0\u67E5\u66F4\u65B0...", L"\u23F3 Checking for Updates...", L"\u23F3 Verificando atualizações..."));
     } else {
         std::wstring chkTxt = std::wstring(tr(L"\u68C0\u67E5\u66F4\u65B0 (\u5F53\u524D v", L"Check for Updates (v", L"Verificar atualizações (v")) + APP_VERSION + L")";
         AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, chkTxt.c_str());
@@ -2755,6 +3422,22 @@ void showContextMenu(AppState& app, POINT screenPt) {
             break;
     }
     refreshDressingRoom(app);   // keep the 换装间 preview in sync with menu skin switches
+    if (app.menuOwnerHwnd && IsWindow(app.menuOwnerHwnd) && app.hwnd && IsWindow(app.hwnd)) {
+        if (app.pendingUpdateCheck) {
+            UpdateCheckResult* pending = app.pendingUpdateCheck;
+            app.pendingUpdateCheck = nullptr;
+            if (!PostMessageW(app.menuOwnerHwnd, WM_UPDATE_CHECK_DONE, 0, reinterpret_cast<LPARAM>(pending))) {
+                delete pending;
+            }
+        }
+        if (app.pendingUpdateDownload) {
+            UpdateDownloadResult* pending = app.pendingUpdateDownload;
+            app.pendingUpdateDownload = nullptr;
+            if (!PostMessageW(app.menuOwnerHwnd, WM_UPDATE_DOWNLOAD_DONE, 0, reinterpret_cast<LPARAM>(pending))) {
+                delete pending;
+            }
+        }
+    }
 }
 
 bool physicsLooksSane(const CatPhysics& p) {
@@ -3297,38 +3980,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_UPDATE_CHECK_DONE: {
             auto* res = reinterpret_cast<UpdateCheckResult*>(lParam);
             if (res) {
-                if (app && res->ok && res->hasUpdate) {
-                    app->availableUpdateVersion = res->latestTag;
-                    app->availableUpdateUrl = res->releaseUrl;
-                    // Show WHICH exe is running: the usual cause of "I already updated but it still
-                    // says there's a new version" is an old copy (Desktop / autostart) still running.
-                    std::wstring msg = trW(L"\u53D1\u73B0 KuroCat \u65B0\u7248\u672C ", L"KuroCat ", L"Nova versão do KuroCat: ") + res->latestTag
-                        + trW(L"\n\u5F53\u524D\u7248\u672C\uFF1Av", L" is available\nCurrent version: v", L"\nVersão atual: v") + APP_VERSION
-                        + trW(L"\n\u5F53\u524D\u8FD0\u884C\u7684\u7A0B\u5E8F\uFF1A", L"\nRunning program: ", L"\nPrograma em execução: ") + currentExePath()
-                        + trW(L"\n\n\u5982\u679C\u4F60\u5DF2\u7ECF\u4E0B\u8F7D\u8FC7\u65B0\u7248\uFF0C\u76F4\u63A5\u53CC\u51FB\u65B0\u7248 exe \u5373\u53EF\u81EA\u52A8\u66FF\u6362\u6389\u8FD9\u4E2A\u65E7\u7248\u3002",
-                              L"\n\nIf you have already downloaded the new version, just double-click the new exe and it will replace this old one.",
-                              L"\n\nSe você já baixou a nova versão, basta dar dois cliques no novo .exe para substituir esta versão antiga.")
-                        + trW(L"\n\n\u662F\u5426\u7ACB\u5373\u5728\u8F6F\u4EF6\u5185\u81EA\u52A8\u4E0B\u8F7D\u5E76\u66F4\u65B0\u91CD\u542F\uFF1F",
-                              L"\n\nDownload and install the update now, then restart?",
-                              L"\n\nBaixar e instalar a atualização agora e reiniciar?");
-                    if (MessageBoxW(nullptr, msg.c_str(), trW(L"KuroCat \u66F4\u65B0\u63D0\u9192", L"KuroCat Update", L"Atualização do KuroCat"),
-                                    MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
-                        startInAppUpdate(*app);
+                if (app) {
+                    if (res->manual) app->isManualUpdateCheck = false;
+                    if (app->inContextMenu) {
+                        if (app->pendingUpdateCheck && app->pendingUpdateCheck->manual && !res->manual) {
+                            delete res;
+                        } else {
+                            delete app->pendingUpdateCheck;
+                            app->pendingUpdateCheck = res;
+                        }
+                        return 0;
                     }
-                } else if (res->manual) {
-                    if (res->ok) {
-                        std::wstring msg = std::wstring(trW(L"\u5F53\u524D\u7248\u672C v", L"KuroCat v", L"A versão v")) + APP_VERSION
-                            + trW(L" \u5DF2\u662F\u6700\u65B0\u7248\u672C\u3002", L" is the latest version.", L" já é a mais recente.");
-                        MessageBoxW(nullptr, msg.c_str(), trW(L"KuroCat \u68C0\u67E5\u66F4\u65B0", L"KuroCat – Check for Updates", L"KuroCat – Verificar atualizações"),
-                                    MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
-                    } else {
-                        MessageBoxW(nullptr,
-                                    trW(L"\u65E0\u6CD5\u8FDE\u63A5\u5230\u66F4\u65B0\u670D\u52A1\u5668\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u6216\u68C0\u67E5\u7F51\u7EDC\u3002",
-                                        L"Couldn't reach the update server. Please try again later or check your network.",
-                                        L"Não foi possível conectar ao servidor de atualizações. Tente de novo mais tarde ou verifique sua conexão."),
-                                    trW(L"KuroCat \u68C0\u67E5\u66F4\u65B0", L"KuroCat – Check for Updates", L"KuroCat – Verificar atualizações"),
-                                    MB_OK | MB_ICONWARNING | MB_TOPMOST);
-                    }
+                    handleUpdateCheckResult(*app, *res);
                 }
                 delete res;
             }
@@ -3338,26 +4001,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_UPDATE_DOWNLOAD_DONE: {
             auto* res = reinterpret_cast<UpdateDownloadResult*>(lParam);
             if (res) {
-                if (app) app->isUpdating = false;
-                bool launched = false;
-                if (res->ok && !res->newExePath.empty() && !res->targetExePath.empty()) {
-                    std::wstring args = L"--apply-update " + std::to_wstring(GetCurrentProcessId())
-                                      + L" \"" + res->targetExePath + L"\"";
-                    launched = launchProcessArgs(res->newExePath, args);
-                }
-                if (launched) {
-                    PostQuitMessage(0);
-                } else {
-                    if (MessageBoxW(nullptr,
-                                    trW(L"\u81EA\u52A8\u4E0B\u8F7D\u6216\u66FF\u6362\u5B89\u88C5\u5305\u5931\u8D25\uFF0C\u662F\u5426\u6253\u5F00\u4E0B\u8F7D\u9875\u624B\u52A8\u4E0B\u8F7D\uFF1F",
-                                        L"The automatic download or replacement failed. Open the download page to update manually?",
-                                        L"Falha ao baixar ou substituir o programa automaticamente. Abrir a página de download para atualizar manualmente?"),
-                                    trW(L"KuroCat \u81EA\u52A8\u66F4\u65B0", L"KuroCat Auto-Update", L"KuroCat – Atualização automática"), MB_YESNO | MB_ICONWARNING | MB_TOPMOST) == IDYES) {
-                        const wchar_t* url = (app && !app->availableUpdateUrl.empty())
-                            ? app->availableUpdateUrl.c_str()
-                            : UPDATE_PAGE_URL;
-                        ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+                if (app) {
+                    app->isUpdating = false;
+                    if (app->inContextMenu) {
+                        delete app->pendingUpdateDownload;
+                        app->pendingUpdateDownload = res;
+                        return 0;
                     }
+                    handleUpdateDownloadResult(*app, *res);
                 }
                 delete res;
             }
@@ -3418,6 +4069,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     Shell_NotifyIconW(NIM_DELETE, &app->nid);
                     if (app->trayIcon) DestroyIcon(app->trayIcon);
                     if (app->dressingRoom) DestroyWindow(app->dressingRoom);
+                    if (app->updateWnd && IsWindow(app->updateWnd)) {
+                        app->replacingUpdateWnd = true;
+                        DestroyWindow(app->updateWnd);
+                        app->replacingUpdateWnd = false;
+                    }
+                    delete app->pendingUpdateCheck;
+                    app->pendingUpdateCheck = nullptr;
+                    delete app->pendingUpdateDownload;
+                    app->pendingUpdateDownload = nullptr;
                     app->destroyBuffer();
                 }
                 PostQuitMessage(0);
@@ -3606,6 +4266,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
     Gdiplus::GdiplusStartupInput gdipInput;
     ULONG_PTR gdipToken = 0;
     Gdiplus::GdiplusStartup(&gdipToken, &gdipInput, nullptr);
@@ -3644,6 +4306,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     trayWc.cbSize = sizeof(trayWc);
     trayWc.lpfnWndProc = wndProc;
     trayWc.hInstance = hInst;
+    trayWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     trayWc.lpszClassName = TRAY_OWNER_CLASS;
     RegisterClassExW(&trayWc);
 
@@ -3743,6 +4406,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 exitCode = (int)msg.wParam;
                 break;
             }
+            if (app.updateWnd && IsWindow(app.updateWnd) && msg.hwnd &&
+                (msg.hwnd == app.updateWnd || IsChild(app.updateWnd, msg.hwnd)) &&
+                IsDialogMessageW(app.updateWnd, &msg)) {
+                if (nowSeconds() > drainUntil) break;
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (nowSeconds() > drainUntil) break;
@@ -3755,6 +4424,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
     g_app = nullptr;
     Gdiplus::GdiplusShutdown(gdipToken);
+    if (SUCCEEDED(comHr)) CoUninitialize();
     if (hMutex) CloseHandle(hMutex);
     return exitCode;
 }

@@ -89,16 +89,20 @@ inline float smooth(float t) {
 }
 
 template <class Face, class Body>
-void drawBody(Graphics &target, GraphicsPath &silhouette, Face face, Body body, const CatPhysics &physics) {
+void drawBody(Graphics &target, GraphicsPath &silhouette, const GraphicsPath &jawBody, Face face, Body body, const CatPhysics &physics) {
     RectF bounds;
     silhouette.GetBounds(&bounds);
+    const float lie = std::clamp(physics.lieIntensity.value, 0.f, 1.f);
+    const float lieS = lie * lie * (3.f - 2.f * lie);
+    const float scruff = std::clamp(physics.scruffDrag.value, 0.f, 1.f);
     material(
         bounds, oat(),
         [&](Graphics &ink) {
             auto map = [&](float x, float y) {
-                // Blend coordinates through the throat so the muzzle and bib share a continuous field.
+                // Blend coordinates through the throat so the muzzle and bib share a continuous field;
+                // push torso origin down when curled asleep so body never folds upward into the face.
                 float t = smooth((y - 12.f) / 45.f);
-                PointF h = face(x, y), b = body(x, y - 100.f);
+                PointF h = face(x, y), b = body(x, y - 100.f + lieS * 28.f);
                 return PointF(h.X + (b.X - h.X) * t, h.Y + (b.Y - h.Y) * t);
             };
             LinearGradientBrush ground(PointF(bounds.X - 3, bounds.Y), PointF(bounds.GetRight() + 3, bounds.Y),
@@ -108,6 +112,18 @@ void drawBody(Graphics &target, GraphicsPath &silhouette, Face face, Body body, 
             REAL stops[] = {0.f, .20f, .48f, .73f, 1.f};
             ground.SetInterpolationColors(colors, stops, 5);
             ink.FillRectangle(&ground, bounds.X - 2, bounds.Y - 2, bounds.Width + 4, bounds.Height + 4);
+
+            // When sitting (lieS == 0 && scruff == 0), raise the jaw clip so the feathered throat stays seamless;
+            // when lying down / loafing / dragged, strictly clip flank stripes & chest bib below the jawline.
+            const float sepBlend = smooth(std::max(lieS, scruff) / 0.25f);
+            GraphicsPath torsoClip;
+            torsoClip.AddPath(&jawBody, FALSE);
+            if (sepBlend < 0.999f) {
+                Matrix shift(1.f, 0.f, 0.f, 1.f, 0.f, -(1.f - sepBlend) * 32.f);
+                torsoClip.Transform(&shift);
+            }
+            GraphicsState torsoClipState = ink.Save();
+            ink.SetClip(&torsoClip, CombineModeIntersect);
 
             SolidBrush stripe(dark()), secondary(Color(117, 99, 78)), lighter(Color(213, 191, 157));
             // The stripes enter from the flanks. Their forked tips fall short of the white bib.
@@ -169,6 +185,7 @@ void drawBody(Graphics &target, GraphicsPath &silhouette, Face face, Body body, 
                        {-16, 31, -20, 26, -21, 23},
                        {-19, 23, -18, 24, -17, 24},
                        {-20, 20, -23, 14, -22, 8}});
+            ink.Restore(torsoClipState);
 
             // Forehead markings split around the lighter nose bridge. Each cheek sweeps backwards
             // from the outer eye and tapers; the two sides never join under the chin.
@@ -223,35 +240,46 @@ void drawBody(Graphics &target, GraphicsPath &silhouette, Face face, Body body, 
             }
 
             // The black skin's resting front legs are contour lines on this silhouette. Put the
-            // idle sock color inside this same fill so it cannot expand the cat's alpha mask.
-            for (float sign : {-1.f, 1.f}) {
-                bool left = sign < 0;
-                Pt paw = left ? physics.leftPaw.point() : physics.rightPaw.point();
-                Pt rest = left ? CatPhysics::LeftPawRest : CatPhysics::RightPawRest;
-                if (std::hypot(paw.x - rest.x, paw.y - rest.y) >= 6.f ||
-                    (left ? (physics.leftPawTyping || physics.leftPawOnMouse) : physics.rightPawTyping))
-                    continue;
-                auto leg = [&](float x, float y) {
-                    return PointF(CatPhysics::SeatAnchor.x + physics.bodyShiftX.value + sign * (16.f + x),
-                                  CatPhysics::SeatAnchor.y + y);
-                };
-                SolidBrush toe(milk()), band(brown());
-                shape(ink, leg, band, {-6, -24},
-                      {{-2, -23, 2, -21, 8, -22},
-                       {7, -19, 4, -18, 0, -19},
-                       {-2, -21, -4, -21, -6, -21},
-                       {-6, -22, -6, -23, -6, -24}});
-                shape(ink, leg, band, {-7, -11},
-                      {{-3, -12, 3, -7, 8, -10},
-                       {6, -5, 1, -6, -2, -7},
-                       {-4, -9, -5, -9, -7, -9},
-                       {-7, -10, -7, -11, -7, -11}});
-                shape(ink, leg, toe, {-6, 4},
-                      {{-3, 4, -3, 2, 0, 3},
-                       {4, 4, 5, 2, 7, 3},
-                       {8, 7, 8, 11, 6, 13},
-                       {2, 15, -3, 14, -6, 12},
-                       {-7, 9, -7, 6, -6, 4}});
+            // idle sock color inside this same fill so it cannot expand the cat's alpha mask,
+            // and retract/fade it below the jaw as lieS rises just like drawFrontPaws().
+            const float idleAlpha = (1.f - smooth((lieS - .48f) / .30f)) * (1.f - smooth(scruff / .12f));
+            if (lieS < .78f && idleAlpha > .01f) {
+                const float seatY = CatPhysics::SeatAnchor.y - scruff * 22.f + lieS * 10.f;
+                const BYTE a = (BYTE)std::clamp((int)std::lround(idleAlpha * 255.f), 0, 255);
+                const Color mCol = milk(), bCol = brown();
+                SolidBrush toe(Color(a, mCol.GetR(), mCol.GetG(), mCol.GetB()));
+                SolidBrush band(Color(a, bCol.GetR(), bCol.GetG(), bCol.GetB()));
+                GraphicsState legClipState = ink.Save();
+                if (lieS > .01f) ink.SetClip(&jawBody, CombineModeIntersect);
+                for (float sign : {-1.f, 1.f}) {
+                    bool left = sign < 0;
+                    Pt paw = left ? physics.leftPaw.point() : physics.rightPaw.point();
+                    Pt rest = left ? CatPhysics::LeftPawRest : CatPhysics::RightPawRest;
+                    if (std::hypot(paw.x - rest.x, paw.y - rest.y) >= 6.f ||
+                        (left ? (physics.leftPawTyping || physics.leftPawOnMouse) : physics.rightPawTyping))
+                        continue;
+                    auto leg = [&](float x, float y) {
+                        return PointF(CatPhysics::SeatAnchor.x + physics.bodyShiftX.value + sign * (16.f - lieS * 4.5f + x),
+                                      seatY + y + lieS * 14.f);
+                    };
+                    shape(ink, leg, band, {-6, -24},
+                          {{-2, -23, 2, -21, 8, -22},
+                           {7, -19, 4, -18, 0, -19},
+                           {-2, -21, -4, -21, -6, -21},
+                           {-6, -22, -6, -23, -6, -24}});
+                    shape(ink, leg, band, {-7, -11},
+                          {{-3, -12, 3, -7, 8, -10},
+                           {6, -5, 1, -6, -2, -7},
+                           {-4, -9, -5, -9, -7, -9},
+                           {-7, -10, -7, -11, -7, -11}});
+                    shape(ink, leg, toe, {-6, 4},
+                          {{-3, 4, -3, 2, 0, 3},
+                           {4, 4, 5, 2, 7, 3},
+                           {8, 7, 8, 11, 6, 13},
+                           {2, 15, -3, 14, -6, 12},
+                           {-7, 9, -7, 6, -6, 4}});
+                }
+                ink.Restore(legClipState);
             }
         },
         [&](TextureBrush &fur) { target.FillPath(&fur, &silhouette); });

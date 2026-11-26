@@ -5,8 +5,8 @@
     <loc>https://kurocat.cc/</loc>
     <xhtml:link rel="alternate" hreflang="zh-CN" href="https://kurocat.cc/" />
     <xhtml:link rel="alternate" hreflang="en" href="https://kurocat.cc/en/" />
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://kurocat.cc/en/" />
-    <lastmod>2026-11-25</lastmod>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://kurocat.cc/" />
+    <lastmod>2026-11-26</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
@@ -14,27 +14,15 @@
     <loc>https://kurocat.cc/en/</loc>
     <xhtml:link rel="alternate" hreflang="zh-CN" href="https://kurocat.cc/" />
     <xhtml:link rel="alternate" hreflang="en" href="https://kurocat.cc/en/" />
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://kurocat.cc/en/" />
-    <lastmod>2026-11-25</lastmod>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://kurocat.cc/" />
+    <lastmod>2026-11-26</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.95</priority>
   </url>
   <url>
     <loc>https://kurocat.cc/obs-guide/</loc>
-    <lastmod>2026-11-25</lastmod>
+    <lastmod>2026-11-26</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.85</priority>
-  </url>
-  <url>
-    <loc>https://kurocat.cc/llms.txt</loc>
-    <lastmod>2026-11-25</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.6</priority>
-  </url>
-  <url>
-    <loc>https://kurocat.cc/llms-full.txt</loc>
-    <lastmod>2026-11-25</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.6</priority>
   </url>
 </urlset>
