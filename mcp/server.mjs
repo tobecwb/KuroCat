@@ -14,7 +14,7 @@ import path from "node:path";
 
 const SERVER_INFO = {
   name: "kurocat-mcp",
-  version: "1.4.3",
+  version: "1.5.1",
 };
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -97,7 +97,7 @@ function validateCatSkin(obj) {
       errors.push(`palette.body must be #RRGGBB or #RRGGBBAA (got ${JSON.stringify(obj.palette.body)}).`);
     }
     const colorFields = [
-      "bodyShade", "belly", "legs", "paws", "pawPads", "earOuter", "earInner",
+      "bodyShade", "belly", "legs", "hindLeg", "paws", "pawPads", "earOuter", "earInner",
       "nose", "mouth", "iris", "tail", "tailTip", "stripes", "whiskers",
       "crease", "outline", "points", "pointsMid",
     ];
@@ -108,7 +108,7 @@ function validateCatSkin(obj) {
     }
   }
 
-  const validSpaces = new Set(["head", "skull", "body", "tail", "leftEar", "rightEar"]);
+  const validSpaces = new Set(["head", "skull", "body", "tail", "leftEar", "rightEar", "hindLeg"]);
   if (obj.regions !== undefined) {
     if (!Array.isArray(obj.regions)) {
       errors.push("regions must be an array.");
@@ -134,6 +134,23 @@ function validateCatSkin(obj) {
       errors.push("marks must be an array.");
     } else if (obj.marks.length > 256) {
       errors.push("marks exceeds maximum limit of 256.");
+    } else {
+      const validBrushes = new Set(["round", "soft", "airbrush", "smudge"]);
+      obj.marks.forEach((m, idx) => {
+        if (!m || typeof m !== "object") {
+          errors.push(`marks[${idx}] must be an object.`);
+          return;
+        }
+        if (m.brush !== undefined && !validBrushes.has(m.brush)) {
+          errors.push(`marks[${idx}].brush must be one of round/soft/airbrush/smudge.`);
+        }
+        if (m.softness !== undefined && (typeof m.softness !== "number" || m.softness < 0 || m.softness > 1)) {
+          errors.push(`marks[${idx}].softness must be a number in 0..1.`);
+        }
+        if (m.kind === "stroke" && m.width !== undefined && (typeof m.width !== "number" || m.width < 0.2 || m.width > 24)) {
+          errors.push(`marks[${idx}].width must be a number in 0.2..24.`);
+        }
+      });
     }
   }
 
@@ -416,10 +433,13 @@ Full Spec: https://github.com/chanke17/KuroCat/blob/main/docs/skin-format.md
 - formatVersion: 1 (required)
 - name: string (required, <= 40 chars)
 - author: string (optional, <= 40 chars)
-- palette: { body (required #RRGGBB/#RRGGBBAA), bodyShade, belly, legs, paws, pawPads, earOuter, earInner, nose, mouth, iris, tail, tailTip, stripes, whiskers, crease, outline, points, pointsMid }
+- palette: { body (required #RRGGBB/#RRGGBBAA), bodyShade, belly, legs, hindLeg, paws, pawPads, earOuter, earInner, nose, mouth, iris, tail, tailTip, stripes, whiskers, crease, outline, points, pointsMid }
 - shape: { build: "standard"|"sleek", bodyWidth: 0.85..1.35, headScale: 0.90..1.15, cheekFullness: 0.85..1.25, earSize: 0.80..1.25, earPointiness: 0.50..1.50, tailLength: 0.70..1.30, tailThickness: 0.70..1.50, pawStagger: 0..1 }
-- regions: <= 64 closed cubic bezier regions in space ("head"|"skull"|"body"|"tail"|"leftEar"|"rightEar")
-- marks: <= 256 vector strokes/polygons
+- regions: <= 64 closed cubic bezier regions in space ("head"|"skull"|"body"|"tail"|"leftEar"|"rightEar"|"hindLeg")
+- marks: <= 256 vector strokes/polygons (stroke width 0.2..24; brush: "round"|"soft"|"airbrush"|"smudge"; softness: 0..1; rendered consistently across sitting & lifted poses in KuroCat v1.4.9+)
+- partGradients: optional per-part gradient overrides (head/body/tail/ears/legs)
+- decorations: <= 8 custom PNG/sticker attachments (anchors: face/headTop/neck/tailTip)
+- renderStyle: optional style preset (e.g. "dazed")
 - headSurface: "dome" (default) | "plane"
 
 ## .kurokb v1 Top-Level Fields

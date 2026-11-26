@@ -6,12 +6,25 @@ Zero external npm dependencies (pure Node.js 18+ ESM). Connect any MCP-compatibl
 
 ## Quick Start
 
+### Recommended: Run via `npx` (Zero Install)
+
+```json
+{
+  "mcpServers": {
+    "kurocat": {
+      "command": "npx",
+      "args": ["-y", "kurocat-mcp"]
+    }
+  }
+}
+```
+
+### Alternative: Run from Source
+
 ```bash
 git clone https://github.com/chanke17/KuroCat.git
 node KuroCat/mcp/server.mjs
 ```
-
-### Claude Desktop / Cursor / LobeChat Configuration
 
 ```json
 {

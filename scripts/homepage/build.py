@@ -91,7 +91,7 @@ def jsonld(lang, d, v):
             "applicationCategory": "UtilitiesApplication",
             "operatingSystem": "macOS 11+, Windows 7 SP1, Windows 8, Windows 10, Windows 11, Linux, UnionTech UOS 20, Kylin V10",
             "softwareVersion": v["version"],
-            "dateModified": "2026-11-25",
+            "dateModified": "2026-11-26",
             "fileSize": v["win_size"].replace(" ", ""),
             "license": "https://opensource.org/licenses/MIT",
             "isAccessibleForFree": True,

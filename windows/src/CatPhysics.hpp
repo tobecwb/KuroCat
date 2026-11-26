@@ -52,6 +52,8 @@ struct CatSettings {
     int obsCaptureMode = 0; // 0 = off, 1 = OBS transparent window capture, 2 = OBS green screen (#00FF00)
     bool obsHideDesktop = false;
     bool autoHideFullscreen = false;
+    bool autoHeadphonesOnMusic = true;
+    bool suppressAutoUpdatePrompt = false;
     int tabletMode = 0; // 0 = auto-detect tablet/stylus, 1 = always tablet, 2 = always mouse
     bool flipHorizontal = false;
     float rotationDeg = 0.0f; // -180..180 degrees
@@ -98,6 +100,8 @@ struct CatSettings {
         obsCaptureMode   = std::clamp((int)readDword(L"OBSCaptureMode", 0), 0, 2);
         obsHideDesktop   = readDword(L"OBSHideDesktop", 0) != 0;
         autoHideFullscreen = readDword(L"AutoHideFullscreen", 0) != 0;
+        autoHeadphonesOnMusic = readDword(L"AutoHeadphonesOnMusic", 1) != 0;
+        suppressAutoUpdatePrompt = readDword(L"SuppressAutoUpdatePrompt", 0) != 0;
         tabletMode       = std::clamp((int)readDword(L"TabletMode", 0), 0, 2);
         flipHorizontal   = readDword(L"FlipHorizontal", 0) != 0;
         {
@@ -188,6 +192,8 @@ struct CatSettings {
         writeDword(L"OBSCaptureMode", (DWORD)obsCaptureMode);
         writeDword(L"OBSHideDesktop", obsHideDesktop ? 1 : 0);
         writeDword(L"AutoHideFullscreen", autoHideFullscreen ? 1 : 0);
+        writeDword(L"AutoHeadphonesOnMusic", autoHeadphonesOnMusic ? 1 : 0);
+        writeDword(L"SuppressAutoUpdatePrompt", suppressAutoUpdatePrompt ? 1 : 0);
         writeDword(L"TabletMode", (DWORD)tabletMode);
         writeDword(L"FlipHorizontal", flipHorizontal ? 1 : 0);
         writeDword(L"RotationTenths", (DWORD)(int)std::lround(std::clamp(rotationDeg, -180.0f, 180.0f) * 10.0f));
@@ -457,6 +463,9 @@ public:
     float petBodyIntensity = 0.0f;
     int totalPetSessions = 0;
     float sleepiness = 0.0f;
+    bool isMusicPlaying = false;
+    float musicIntensity = 0.0f;
+    float musicPhase = 0.0f;
     float yawnAmount = 0.0f;
     float yawnTimer_ = 0.0f;
     bool isYawning_ = false;
@@ -986,10 +995,14 @@ public:
         }
 
         // Subtle mini-mouse movement
+        bool hasRot = std::fabs(settings.rotationDeg) > 0.05f;
+        float rotRad = hasRot ? (settings.rotationDeg * 3.14159265f / 180.0f) : 0.0f;
         float flipSign = settings.flipHorizontal ? -1.0f : 1.0f;
+        float rotVelDx = hasRot ? (engine.mouseVelocity.x * std::cos(-rotRad) - engine.mouseVelocity.y * std::sin(-rotRad)) : engine.mouseVelocity.x;
+        float rotVelDy = hasRot ? (engine.mouseVelocity.x * std::sin(-rotRad) + engine.mouseVelocity.y * std::cos(-rotRad)) : engine.mouseVelocity.y;
         mouseOffset.setTarget({
-            std::clamp(engine.mouseVelocity.x * 0.0045f * flipSign, -5.5f, 5.5f),
-            std::clamp(engine.mouseVelocity.y * 0.0045f, -4.5f, 4.5f)
+            std::clamp(rotVelDx * 0.0045f * flipSign, -5.5f, 5.5f),
+            std::clamp(rotVelDy * 0.0045f, -4.5f, 4.5f)
         });
         mouseOffset.step(dt, 120.0f, 16.0f);
         mousePressLeft.step(dt, 400.0f, 24.0f);
@@ -1251,11 +1264,23 @@ public:
         float winW = std::max(1.0f, (float)(windowRect.right - windowRect.left));
         float winScale = std::max(0.2f, winW / CanvasWidth);
         float headCanvasX = settings.flipHorizontal ? (CanvasWidth - eyeOrigin.x) : eyeOrigin.x;
+        float headCanvasY = eyeOrigin.y;
+        if (hasRot) {
+            float fitScale = 1.0f - std::fabs(std::sin(rotRad)) * 0.14f;
+            float dx = headCanvasX - CanvasWidth * 0.5f;
+            float dy = headCanvasY - CanvasHeight * 0.5f;
+            headCanvasX = CanvasWidth * 0.5f + (dx * std::cos(rotRad) - dy * std::sin(rotRad)) * fitScale;
+            headCanvasY = CanvasHeight * 0.5f + (dx * std::sin(rotRad) + dy * std::cos(rotRad)) * fitScale;
+        }
         float headScreenX = (float)windowRect.left + headCanvasX * winScale;
-        float headScreenY = (float)windowRect.top  + eyeOrigin.y * winScale;
+        float headScreenY = (float)windowRect.top  + headCanvasY * winScale;
 
-        float curDx = (((float)engine.lastCursorPos.x - headScreenX) / 290.0f) * flipSign;
-        float curDy = ((float)engine.lastCursorPos.y - headScreenY) / 260.0f;
+        float rawWorldDx = (float)engine.lastCursorPos.x - headScreenX;
+        float rawWorldDy = (float)engine.lastCursorPos.y - headScreenY;
+        float localWorldDx = hasRot ? (rawWorldDx * std::cos(-rotRad) - rawWorldDy * std::sin(-rotRad)) : rawWorldDx;
+        float localWorldDy = hasRot ? (rawWorldDx * std::sin(-rotRad) + rawWorldDy * std::cos(-rotRad)) : rawWorldDy;
+        float curDx = (localWorldDx / 290.0f) * flipSign;
+        float curDy = localWorldDy / 260.0f;
         float curMag = std::hypot(curDx, curDy);
         float clampedCur = std::min(1.0f, curMag);
         float cursorNX = curMag > 0.001f ? (curDx / curMag) * clampedCur : 0.0f;
@@ -1271,12 +1296,27 @@ public:
             lookY = cursorNY * 0.72f + 0.25f;
         }
 
+        float wantMusic = (isMusicPlaying && settings.autoHeadphonesOnMusic) ? 1.0f : 0.0f;
+        float musicRate = wantMusic > musicIntensity ? 3.2f : 2.0f;
+        musicIntensity += (wantMusic - musicIntensity) * std::min(1.0f, dt * musicRate);
+        if (musicIntensity < 0.002f && wantMusic == 0.0f) musicIntensity = 0.0f;
+        if (musicIntensity > 0.005f) {
+            musicPhase += dt * 5.86f;
+            if (musicPhase > 6283.18f) musicPhase -= 6283.18f;
+        }
+        float musicRhythm = musicIntensity * (1.0f - std::min(1.0f, sleepiness * 1.1f)) *
+                            (1.0f - std::min(1.0f, scruffDrag.value * 1.2f)) *
+                            (1.0f - std::min(1.0f, dizzyIntensity.value * 1.4f)) *
+                            (1.0f - std::min(1.0f, angerIntensity.value * 0.8f));
+        float musicNod = std::fabs(std::sin(musicPhase)) * 0.14f * musicRhythm;
+        float musicSway = std::sin(musicPhase * 0.5f) * 0.068f * musicRhythm;
+
         if (sleepiness > 0.45f) {
             headYaw.target = 0.0f;
             headPitch.target = 0.45f * sleepiness * (1.0f - 0.35f * classicSleepBlend);
         } else {
             headYaw.target = std::clamp(lookX, -1.0f, 1.0f);
-            headPitch.target = std::clamp(lookY, -1.0f, 1.0f);
+            headPitch.target = std::clamp(lookY + musicNod, -1.0f, 1.0f);
         }
         float headStiff = 88.0f + hunt * 75.0f;
         float headDamp  = 14.5f + hunt * 4.5f;
@@ -1284,7 +1324,7 @@ public:
         headPitch.step(dt, headStiff, headDamp);
 
         if (now - lastPetTime_ > 0.28) {
-            headTilt.target = bodyTilt.target * 0.45f + headYaw.value * (0.11f + hunt * 0.05f) - headYaw.value * headPitch.value * 0.04f + lie * 0.12f * (1.0f - 0.5f * classicSleepBlend);
+            headTilt.target = bodyTilt.target * 0.45f + headYaw.value * (0.11f + hunt * 0.05f) - headYaw.value * headPitch.value * 0.04f + lie * 0.12f * (1.0f - 0.5f * classicSleepBlend) + musicSway;
         }
         headTilt.step(dt, 130.0f, 16.0f);
 

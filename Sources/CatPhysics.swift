@@ -134,6 +134,14 @@ final class CatSettings {
     var autoHideFullscreen: Bool {
         didSet { UserDefaults.standard.set(autoHideFullscreen, forKey: "KuroCat.AutoHideFullscreen") }
     }
+    /// Automatically put on headphones with gentle rhythm & music notes when audio/video/music is playing
+    var autoHeadphonesOnMusic: Bool {
+        didSet { UserDefaults.standard.set(autoHeadphonesOnMusic, forKey: "KuroCat.AutoHeadphonesOnMusic") }
+    }
+    /// When true, automatic startup update checks stay silent (user clicked "暂不更新"); manual check still works
+    var suppressAutoUpdatePrompt: Bool {
+        didSet { UserDefaults.standard.set(suppressAutoUpdatePrompt, forKey: "KuroCat.SuppressAutoUpdatePrompt") }
+    }
     /// 0 = Auto-detect graphics tablet/stylus, 1 = Always show tablet, 2 = Always show mouse
     var tabletMode: Int {
         didSet { UserDefaults.standard.set(tabletMode, forKey: "KuroCat.TabletMode") }
@@ -252,6 +260,8 @@ final class CatSettings {
         obsCaptureMode = d.object(forKey: "KuroCat.OBSCaptureMode") as? Int ?? 0
         obsHideDesktop = d.object(forKey: "KuroCat.OBSHideDesktop") as? Bool ?? false
         autoHideFullscreen = d.object(forKey: "KuroCat.AutoHideFullscreen") as? Bool ?? false
+        autoHeadphonesOnMusic = d.object(forKey: "KuroCat.AutoHeadphonesOnMusic") as? Bool ?? true
+        suppressAutoUpdatePrompt = d.object(forKey: "KuroCat.SuppressAutoUpdatePrompt") as? Bool ?? false
         tabletMode = d.object(forKey: "KuroCat.TabletMode") as? Int ?? 0
         flipHorizontal = d.object(forKey: "KuroCat.FlipHorizontal") as? Bool ?? false
         rotationDeg = CGFloat(d.object(forKey: "KuroCat.RotationDeg") as? Double ?? 0.0)
@@ -504,6 +514,9 @@ final class CatPhysics {
 
     // Sleepy idle state
     private(set) var sleepiness: CGFloat = 0 // 0 = awake, 1 = napping
+    var isMusicPlaying: Bool = false
+    private(set) var musicIntensity: CGFloat = 0 // 0 = no headphones, 1 = wearing headphones & vibing
+    private(set) var musicPhase: CGFloat = 0     // continuous beat phase (~112 BPM)
     private(set) var yawnAmount: CGFloat = 0 // 0 = closed, 1 = peak wide yawn before sleep
     private var yawnTimer: CGFloat = 0
     private(set) var isYawning = false
@@ -1151,9 +1164,15 @@ final class CatPhysics {
 
         // Subtle mini-mouse movement driven by global cursor velocity
         let flipped = CatSettings.shared.flipHorizontal
+        let rotationDeg = CatSettings.shared.rotationDeg
+        let hasRot = abs(rotationDeg) > 0.05
+        let rotRad = hasRot ? (rotationDeg * .pi / 180.0) : 0.0
         let flipSign: CGFloat = flipped ? -1.0 : 1.0
-        let targetMouseDx = max(-5.5, min(5.5, curMouseVel.dx * 0.0045 * flipSign))
-        let targetMouseDy = max(-4.5, min(4.5, -curMouseVel.dy * 0.0045))
+        let velDownY = -curMouseVel.dy
+        let rotVelDx = hasRot ? (curMouseVel.dx * cos(-rotRad) - velDownY * sin(-rotRad)) : curMouseVel.dx
+        let rotVelDy = hasRot ? (curMouseVel.dx * sin(-rotRad) + velDownY * cos(-rotRad)) : velDownY
+        let targetMouseDx = max(-5.5, min(5.5, rotVelDx * 0.0045 * flipSign))
+        let targetMouseDy = max(-4.5, min(4.5, rotVelDy * 0.0045))
         mouseOffset.target = CGPoint(x: targetMouseDx, y: targetMouseDy)
         mouseOffset.step(dt: dt, stiffness: 120, damping: 16)
         mousePressLeft.step(dt: dt, stiffness: 400, damping: 24)
@@ -1409,12 +1428,24 @@ final class CatPhysics {
 
         // Compute normalized vector from cat head to real macOS screen cursor
         let scale = max(0.2, windowFrameInScreen.width / CatPhysics.canvasSize.width)
-        let headCanvasX = flipped ? (CatPhysics.canvasSize.width - eyeOriginCanvas.x) : eyeOriginCanvas.x
+        var headCanvasX = flipped ? (CatPhysics.canvasSize.width - eyeOriginCanvas.x) : eyeOriginCanvas.x
+        var headCanvasY = eyeOriginCanvas.y
+        if hasRot {
+            let fitScale = 1.0 - abs(sin(rotRad)) * 0.14
+            let dx = headCanvasX - 180.0
+            let dy = headCanvasY - 160.0
+            headCanvasX = 180.0 + (dx * cos(rotRad) - dy * sin(rotRad)) * fitScale
+            headCanvasY = 160.0 + (dx * sin(rotRad) + dy * cos(rotRad)) * fitScale
+        }
         let headScreenX = windowFrameInScreen.minX + headCanvasX * scale
-        let headScreenY = windowFrameInScreen.maxY - eyeOriginCanvas.y * scale
+        let headScreenY = windowFrameInScreen.maxY - headCanvasY * scale
         let cursor = curMouseLoc
-        let curDx = ((cursor.x - headScreenX) / 290.0) * flipSign
-        let curDy = -(cursor.y - headScreenY) / 260.0
+        let rawWorldDx = cursor.x - headScreenX
+        let rawWorldDy = -(cursor.y - headScreenY)
+        let localWorldDx = hasRot ? (rawWorldDx * cos(-rotRad) - rawWorldDy * sin(-rotRad)) : rawWorldDx
+        let localWorldDy = hasRot ? (rawWorldDx * sin(-rotRad) + rawWorldDy * cos(-rotRad)) : rawWorldDy
+        let curDx = (localWorldDx / 290.0) * flipSign
+        let curDy = localWorldDy / 260.0
         let curMag = hypot(curDx, curDy)
         let clampedCur = min(1.0, curMag)
         let cursorNX = curMag > 0.001 ? (curDx / curMag) * clampedCur : 0
@@ -1438,12 +1469,29 @@ final class CatPhysics {
         }
 
         // Head turns smoothly in 2.5D (yaw & pitch) — locks on faster during hunting mode!
+        // Music listening blend & gentle rhythm sway/nod
+        let wantMusic: CGFloat = (isMusicPlaying && CatSettings.shared.autoHeadphonesOnMusic) ? 1.0 : 0.0
+        let musicRate: CGFloat = wantMusic > musicIntensity ? 3.2 : 2.0
+        musicIntensity += (wantMusic - musicIntensity) * min(1.0, dt * musicRate)
+        if musicIntensity < 0.002 && wantMusic == 0 { musicIntensity = 0 }
+        if musicIntensity > 0.005 {
+            musicPhase += dt * 5.86 // ~112 BPM half-cycle beat
+            if musicPhase > 6283.18 { musicPhase -= 6283.18 }
+        }
+        let rAwake: CGFloat = 1.0 - min(1.0, sleepiness * 1.1)
+        let rScruff: CGFloat = 1.0 - min(1.0, scruffDrag.value * 1.2)
+        let rDizzy: CGFloat = 1.0 - min(1.0, dizzyIntensity.value * 1.4)
+        let rAnger: CGFloat = 1.0 - min(1.0, angerIntensity.value * 0.8)
+        let musicRhythm: CGFloat = musicIntensity * rAwake * rScruff * rDizzy * rAnger
+        let musicNod = abs(sin(musicPhase)) * 0.14 * musicRhythm
+        let musicSway = sin(musicPhase * 0.5) * 0.068 * musicRhythm
+
         if sleepiness > 0.45 {
             headYaw.target = 0
             headPitch.target = 0.45 * sleepiness * (1.0 - classicSleepBlend)
         } else {
             headYaw.target = max(-1.0, min(1.0, lookTargetX))
-            headPitch.target = max(-1.0, min(1.0, lookTargetY))
+            headPitch.target = max(-1.0, min(1.0, lookTargetY + musicNod))
         }
         let headStiff: CGFloat = 88 + hunt * 75
         let headDamp: CGFloat = 14.5 + hunt * 4.5
@@ -1452,7 +1500,7 @@ final class CatPhysics {
 
         // Subtle natural head roll coupled to head turning (curious tilt / locked-on hunt!)
         if now - lastPetTime > 0.28 {
-            headTilt.target = (bodyTilt.target * 0.45 + headYaw.value * (0.11 + hunt * 0.05) - headYaw.value * headPitch.value * 0.04 + lie * 0.12) * (1.0 - classicSleepBlend)
+            headTilt.target = (bodyTilt.target * 0.45 + headYaw.value * (0.11 + hunt * 0.05) - headYaw.value * headPitch.value * 0.04 + lie * 0.12 + musicSway) * (1.0 - classicSleepBlend)
         }
         headTilt.step(dt: dt, stiffness: 130, damping: 16)
 
@@ -1550,7 +1598,11 @@ struct SkinColor: Hashable {
         SkinColor(r: CGFloat((rgb >> 16) & 255)/255, g: CGFloat((rgb >> 8) & 255)/255, b: CGFloat(rgb & 255)/255, a: a)
     }
     var ns: NSColor { NSColor(calibratedRed: r, green: g, blue: b, alpha: a) }
-    func withAlpha(_ alpha: CGFloat) -> NSColor { NSColor(calibratedRed: r, green: g, blue: b, alpha: alpha) }
+    var srgbNS: NSColor { NSColor(srgbRed: r, green: g, blue: b, alpha: a) }
+    func withAlpha(_ alpha: CGFloat, srgb: Bool = false) -> NSColor {
+        srgb ? NSColor(srgbRed: r, green: g, blue: b, alpha: a * alpha)
+             : NSColor(calibratedRed: r, green: g, blue: b, alpha: a * alpha)
+    }
     var luminance: CGFloat { 0.2126 * r + 0.7152 * g + 0.0722 * b }
 }
 
@@ -1559,7 +1611,7 @@ enum SkinSpace: String { case head, skull, body, tail, leftEar, rightEar, leftAr
 enum SkinBuild: String { case standard, sleek }
 enum SkinHeadSurface: String { case dome, plane }
 enum SkinAnchorPoint: String { case headTop, face, neck, tailTip }
-enum SkinRenderStyle: String { case standard, douni, dazed }
+enum SkinRenderStyle: String { case standard, douni, dazed, beagle }
 enum SkinTypingStyle: String { case standard, douni }
 
 /// One pen-tool anchor; in/out are absolute handle positions in the same part space.
@@ -1572,6 +1624,10 @@ struct SkinRegion {
     var flat: [CGPoint]                  // 16 segments per cubic, in part space
 }
 
+enum SkinBrush: String {
+    case round, soft, airbrush, smudge
+}
+
 struct SkinMark {
     var space: SkinSpace
     var stroke: Bool
@@ -1579,6 +1635,8 @@ struct SkinMark {
     var color: SkinColor
     var points: [CGPoint]
     var clipToBib: Bool = false
+    var brush: SkinBrush = .round
+    var softness: CGFloat = 0.65
 }
 
 struct SkinShape: Hashable {
@@ -1966,7 +2024,9 @@ struct SkinSpec {
                     pts.append(CGPoint(x: min(400, max(-400, x)), y: min(400, max(-400, y))))
                 }
                 let clipToBib = (m["clipToBib"] as? Bool) == true
-                spec.marks.append(SkinMark(space: sp, stroke: stroke, width: width, color: c, points: pts, clipToBib: clipToBib))
+                let brush = (m["brush"] as? String).flatMap(SkinBrush.init(rawValue:)) ?? .round
+                let softness = try number(m["softness"], "\(f).softness", 0, 1, 0.65)
+                spec.marks.append(SkinMark(space: sp, stroke: stroke, width: width, color: c, points: pts, clipToBib: clipToBib, brush: brush, softness: softness))
             }
         }
 
@@ -2013,7 +2073,7 @@ struct SkinSpec {
         let w = image.width, h = image.height
         guard w > 0, h > 0,
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return image
         }
