@@ -30,6 +30,10 @@ using std::max;
 #include <unordered_set>
 #include <cmath>
 #include <cwchar>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include "KeyMap.hpp"
 #include "InputEngine.hpp"
 #include "CatPhysics.hpp"
@@ -62,7 +66,7 @@ inline const wchar_t* trW(const wchar_t* zh, const wchar_t* en, const wchar_t* p
 
 namespace {
 
-constexpr const wchar_t* APP_VERSION = L"1.5.1";
+constexpr const wchar_t* APP_VERSION = L"1.5.2";
 constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray owner window so newer builds can take over older ones
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
@@ -140,6 +144,7 @@ enum MenuCmd : UINT {
     CMD_OPEN_KB_PLAZA,
     CMD_OPEN_KB_DIR,
     CMD_OPEN_SETTINGS,
+    CMD_BATCH_DELETE_SKINS,
     CMD_SKIN_SELECT_BASE = 4000,  // + index into AppState::skins.skins
     CMD_SKIN_DELETE_BASE = 5000,
     CMD_KB_SELECT_BASE = 6000,    // + index into AppState::kbLibrary.skins
@@ -172,6 +177,54 @@ enum class UpdateDialogKind {
     UpToDate,
     CheckFailed,
     DownloadFailed
+};
+
+struct RenderedPoseSnapshot {
+    int w = 0, h = 0;
+    std::string skinId;
+    std::string kbSkinId;
+    int coatTheme = 0;
+    int eyeTheme = 0;
+    int tabletMode = 0;
+    int obsCaptureMode = 0;
+    bool flipHorizontal = false;
+    int rotationDeg10 = 0;
+    bool isEditMode = false;
+    bool showKeyOverlay = false;
+    bool showStats = false;
+    int language = 2;
+    bool isMusicPlaying = false;
+    bool foregroundBlocksKeys = false;
+    bool leftMouseDown = false;
+    bool rightMouseDown = false;
+    size_t activeKeyCount = 0;
+    uint64_t activeKeyHash = 0;
+    int totalKeystrokesToday = 0;
+    int totalPetSessions = 0;
+    int headX10 = 0, headY10 = 0;
+    int leftPawY10 = 0, rightPawY10 = 0, thirdPawY10 = 0;
+    int breath100 = 0, blink100 = 0, sleep100 = 0;
+    int tail10 = 0, purr100 = 0, happy100 = 0;
+    int sparkleCount = 0, zzzCount = 0, noteCount = 0;
+
+    bool operator==(const RenderedPoseSnapshot& o) const {
+        return w == o.w && h == o.h &&
+               skinId == o.skinId && kbSkinId == o.kbSkinId &&
+               coatTheme == o.coatTheme && eyeTheme == o.eyeTheme &&
+               tabletMode == o.tabletMode && obsCaptureMode == o.obsCaptureMode &&
+               flipHorizontal == o.flipHorizontal && rotationDeg10 == o.rotationDeg10 &&
+               isEditMode == o.isEditMode && showKeyOverlay == o.showKeyOverlay &&
+               showStats == o.showStats && language == o.language &&
+               isMusicPlaying == o.isMusicPlaying && foregroundBlocksKeys == o.foregroundBlocksKeys &&
+               leftMouseDown == o.leftMouseDown && rightMouseDown == o.rightMouseDown &&
+               activeKeyCount == o.activeKeyCount && activeKeyHash == o.activeKeyHash &&
+               totalKeystrokesToday == o.totalKeystrokesToday && totalPetSessions == o.totalPetSessions &&
+               headX10 == o.headX10 && headY10 == o.headY10 &&
+               leftPawY10 == o.leftPawY10 && rightPawY10 == o.rightPawY10 && thirdPawY10 == o.thirdPawY10 &&
+               breath100 == o.breath100 && blink100 == o.blink100 && sleep100 == o.sleep100 &&
+               tail10 == o.tail10 && purr100 == o.purr100 && happy100 == o.happy100 &&
+               sparkleCount == o.sparkleCount && zzzCount == o.zzzCount && noteCount == o.noteCount;
+    }
 };
 
 struct AppState {
@@ -260,6 +313,16 @@ struct AppState {
     double blockedForegroundSince = 0.0;
     bool warnedElevatedForeground = false;
     HWINEVENTHOOK foregroundHook = nullptr;
+
+    // Idle/dirty rendering & background WASAPI polling
+    bool forceRedraw = true;
+    RenderedPoseSnapshot lastRenderedPose;
+    std::atomic<bool> audioPollingEnabled{false};
+    std::atomic<bool> audioSustainedPlaying{false};
+    std::atomic<bool> audioThreadStop{false};
+    std::mutex audioThreadMu;
+    std::condition_variable audioThreadCv;
+    std::thread audioThread;
     bool sessionNotifyRegistered = false;
 
     void destroyBuffer() {
@@ -904,7 +967,7 @@ void recoverAfterSystemEvent(AppState& app) {
     double now = nowSeconds();
     app.input.resetAllState();
     app.input.registerRawInput(app.hwnd);
-    app.input.installKeyboardHook();
+    app.input.installKeyboardHook(app.hwnd);
     if (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop) {
         applyOBSMode(app);
     }
@@ -1072,22 +1135,11 @@ void housekeeping(AppState& app) {
     app.nextHousekeepingTime = now + 0.5;
     if (!app.hwnd) return;
 
-    // Poll active system audio sessions every ~0.8s; require >= 1.2s sustained audio to ignore brief dings
-    static double s_nextMusicCheck = 0.0;
-    static double s_audioSustainedSince = 0.0;
-    if (!app.settings.autoHeadphonesOnMusic) {
-        s_audioSustainedSince = 0.0;
-        app.physics.isMusicPlaying = false;
-    } else if (now >= s_nextMusicCheck) {
-        s_nextMusicCheck = now + 0.8;
-        if (isSystemAudioPlaying()) {
-            if (s_audioSustainedSince == 0.0) s_audioSustainedSince = now;
-            app.physics.isMusicPlaying = (now - s_audioSustainedSince) >= 1.2;
-        } else {
-            s_audioSustainedSince = 0.0;
-            app.physics.isMusicPlaying = false;
-        }
-    }
+    // Read background WASAPI polling result without blocking the UI thread
+    app.audioPollingEnabled.store(app.settings.autoHeadphonesOnMusic, std::memory_order_relaxed);
+    app.physics.isMusicPlaying = app.settings.autoHeadphonesOnMusic
+        ? app.audioSustainedPlaying.load(std::memory_order_relaxed)
+        : false;
 
     bool fullscreenFg = isForegroundFullscreen(app.hwnd);
     bool obsBg = (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop);
@@ -1825,6 +1877,200 @@ void confirmDeleteSkin(AppState& app, const std::string& id) {
     refreshSettingsWindow(app);
 }
 
+struct BatchDeleteSkinDlgState {
+    HWND listHwnd = nullptr;
+    HWND countLbl = nullptr;
+    HWND delBtn = nullptr;
+    std::vector<std::string> ids;
+    std::vector<std::string> selectedIds;
+    bool accepted = false;
+    bool done = false;
+};
+
+static void updateBatchDeleteUiCount(BatchDeleteSkinDlgState& st) {
+    if (!st.listHwnd) return;
+    int selCount = (int)SendMessageW(st.listHwnd, LB_GETSELCOUNT, 0, 0);
+    if (selCount < 0) selCount = 0;
+    if (st.countLbl) {
+        wchar_t buf[64] = {};
+        swprintf_s(buf, trW(L"\u5DF2\u9009\uFF1A%d / %zu \u6B3E", L"Selected: %d / %zu", L"Selecionadas: %d / %zu"), selCount, st.ids.size());
+        SetWindowTextW(st.countLbl, buf);
+    }
+    if (st.delBtn) {
+        wchar_t buf[64] = {};
+        swprintf_s(buf, trW(L"\u5220\u9664\u6240\u9009 (%d)", L"Delete (%d)", L"Excluir (%d)"), selCount);
+        SetWindowTextW(st.delBtn, buf);
+        EnableWindow(st.delBtn, selCount > 0 ? TRUE : FALSE);
+    }
+}
+
+static LRESULT CALLBACK BatchDeleteSkinDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = (BatchDeleteSkinDlgState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_NCCREATE: {
+            auto* cs = (CREATESTRUCTW*)lParam;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            int code = HIWORD(wParam);
+            if (!st) break;
+            if (id == 1001 && code == LBN_SELCHANGE) {
+                updateBatchDeleteUiCount(*st);
+                return 0;
+            }
+            if (id == 1002) { // Select All
+                SendMessageW(st->listHwnd, LB_SETSEL, TRUE, -1);
+                updateBatchDeleteUiCount(*st);
+                return 0;
+            }
+            if (id == 1003) { // Clear
+                SendMessageW(st->listHwnd, LB_SETSEL, FALSE, -1);
+                updateBatchDeleteUiCount(*st);
+                return 0;
+            }
+            if (id == IDOK) {
+                int selCount = (int)SendMessageW(st->listHwnd, LB_GETSELCOUNT, 0, 0);
+                if (selCount <= 0) return 0;
+                std::vector<int> indices((size_t)selCount);
+                SendMessageW(st->listHwnd, LB_GETSELITEMS, (WPARAM)selCount, (LPARAM)indices.data());
+                st->selectedIds.clear();
+                for (int idx : indices) {
+                    if (idx >= 0 && (size_t)idx < st->ids.size()) st->selectedIds.push_back(st->ids[(size_t)idx]);
+                }
+                st->accepted = !st->selectedIds.empty();
+                st->done = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if (id == IDCANCEL) {
+                st->accepted = false;
+                st->done = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            if (st) { st->accepted = false; st->done = true; }
+            DestroyWindow(hwnd);
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void confirmBatchDeleteSkins(AppState& app) {
+    if (app.skins.skins.empty()) {
+        MessageBoxW(app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd,
+                    trW(L"\u6682\u65E0\u5DF2\u5BFC\u5165\u7684\u81EA\u5B9A\u4E49\u76AE\u80A4\u3002", L"No imported custom skins yet.", L"Nenhuma skin importada ainda."),
+                    L"KuroCat", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+        return;
+    }
+
+    static bool reg = false;
+    const wchar_t* clsName = L"KuroCatBatchDeleteSkinDlg";
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    if (!reg) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = BatchDeleteSkinDlgProc;
+        wc.hInstance = inst;
+        wc.lpszClassName = clsName;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
+        reg = true;
+    }
+
+    BatchDeleteSkinDlgState st;
+    int w = 420, h = 420;
+    int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
+    int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
+    HWND dlg = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
+        clsName,
+        trW(L"\u6279\u91CF\u5220\u9664\u5DF2\u5BFC\u5165\u76AE\u80A4", L"Batch Delete Imported Skins", L"Excluir várias skins importadas"),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        sx, sy, w, h,
+        app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd,
+        nullptr, inst, &st
+    );
+    if (!dlg) return;
+
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND tipLbl = CreateWindowExW(0, L"STATIC",
+        trW(L"\u70B9\u51FB\u5217\u8868\u591A\u9009\u8981\u5220\u9664\u7684\u76AE\u80A4\uFF08\u5185\u7F6E\u732B\u54AA\u4E0D\u53D7\u5F71\u54CD\uFF09\uFF1A", L"Click items to toggle selection (built-in cats stay safe):", L"Clique para marcar as skins (as nativas não são afetadas):"),
+        WS_CHILD | WS_VISIBLE, 16, 14, 376, 20, dlg, nullptr, inst, nullptr);
+    HWND selAllBtn = CreateWindowExW(0, L"BUTTON", trW(L"\u5168\u9009", L"Select All", L"Todas"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 16, 38, 72, 24, dlg, (HMENU)1002, inst, nullptr);
+    HWND selNoneBtn = CreateWindowExW(0, L"BUTTON", trW(L"\u6E05\u7A7A", L"Clear", L"Nenhuma"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 94, 38, 72, 24, dlg, (HMENU)1003, inst, nullptr);
+    st.countLbl = CreateWindowExW(0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_RIGHT, 220, 42, 172, 18, dlg, nullptr, inst, nullptr);
+
+    st.listHwnd = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_MULTIPLESEL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+        16, 68, 376, 260, dlg, (HMENU)1001, inst, nullptr);
+
+    for (const auto& sk : app.skins.skins) {
+        st.ids.push_back(sk.id);
+        std::string line = app.skins.displayName(sk);
+        if (sk.id == app.settings.customSkin) line += kurocat::uiText(" [正在穿]", " [Active]", " [em uso]");
+        if (!sk.author.empty()) line += " - " + sk.author;
+        SendMessageW(st.listHwnd, LB_ADDSTRING, 0, (LPARAM)utf8ToWide(line).c_str());
+    }
+
+    HWND cancelBtn = CreateWindowExW(0, L"BUTTON", trW(L"\u53D6\u6D88", L"Cancel", L"Cancelar"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 16, 340, 88, 28, dlg, (HMENU)IDCANCEL, inst, nullptr);
+    st.delBtn = CreateWindowExW(0, L"BUTTON", trW(L"\u5220\u9664\u6240\u9009 (0)", L"Delete (0)", L"Excluir (0)"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 252, 340, 140, 28, dlg, (HMENU)IDOK, inst, nullptr);
+
+    for (HWND c : {tipLbl, selAllBtn, selNoneBtn, st.countLbl, st.listHwnd, cancelBtn, st.delBtn}) {
+        SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
+    }
+    updateBatchDeleteUiCount(st);
+    SetForegroundWindow(dlg);
+    SetFocus(st.listHwnd);
+
+    MSG m;
+    while (!st.done && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE) {
+            PostMessageW(dlg, WM_COMMAND, IDCANCEL, 0);
+            continue;
+        }
+        if (!IsDialogMessageW(dlg, &m)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    if (!st.accepted || st.selectedIds.empty()) return;
+
+    const std::wstring selN = std::to_wstring(st.selectedIds.size());
+    std::wstring msgText = trW(L"\u786E\u8BA4\u6279\u91CF\u5220\u9664\u8FD9 ", L"Delete ", L"Excluir ") + selN
+        + trW(L" \u6B3E\u76AE\u80A4\uFF1F\n\n\u4F1A\u4ECE\u76AE\u80A4\u6587\u4EF6\u5939\u91CC\u5220\u9664\u5BF9\u5E94\u6587\u4EF6\uFF0C\u5220\u9664\u540E\u9700\u8981\u91CD\u65B0\u5BFC\u5165\u3002",
+              L" selected .kurocat skin file(s)?",
+              L" arquivo(s) de skin .kurocat selecionado(s)?\n\nEles serão apagados da pasta de skins; para usá-los de novo será preciso importar outra vez.");
+    if (MessageBoxW(app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd, msgText.c_str(), L"KuroCat",
+                    MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    std::vector<std::string> failed;
+    std::vector<std::string> removed = app.skins.removeMany(st.selectedIds, &failed);
+    if (std::find(removed.begin(), removed.end(), app.settings.customSkin) != removed.end()) {
+        app.settings.customSkin.clear();
+        app.settings.saveToRegistry();
+    }
+    if (!failed.empty()) {
+        std::wstring warn = trW(L"\u5DF2\u5220\u9664 ", L"Deleted ", L"Excluídas: ") + std::to_wstring(removed.size())
+            + trW(L" \u6B3E\uFF0C\u6709 ", L", failed ", L"; com falha: ") + std::to_wstring(failed.size())
+            + trW(L" \u6B3E\u65E0\u6CD5\u5220\u9664\u3002", L".", L".");
+        MessageBoxW(app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd, warn.c_str(), L"KuroCat", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+    }
+    refreshDressingRoom(app);
+    refreshSettingsWindow(app);
+}
+
 void confirmDeleteKeyboardSkin(AppState& app, const std::string& id) {
     const KeyboardSkinSpec* kb = app.kbLibrary.find(id);
     if (!kb) return;
@@ -1849,6 +2095,7 @@ enum CtrlId : int {
     ID_BTN_DRESSING,
     ID_BTN_RENAME_SKIN,
     ID_BTN_DEL_SKIN,
+    ID_BTN_BATCH_DEL_SKIN,
     ID_EYE_COMBO,
     ID_KB_COMBO,
     ID_BTN_IMPORT_KB,
@@ -1945,6 +2192,9 @@ void rebuildCombosAndSync(AppState& app) {
         if (HWND hDel = GetDlgItem(hwnd, ID_BTN_DEL_SKIN)) {
             EnableWindow(hDel, hasCustom ? TRUE : FALSE);
             InvalidateRect(hDel, nullptr, TRUE);
+        }
+        if (HWND hBatch = GetDlgItem(hwnd, ID_BTN_BATCH_DEL_SKIN)) {
+            EnableWindow(hBatch, !app.skins.skins.empty() ? TRUE : FALSE);
         }
     }
 
@@ -2316,6 +2566,9 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                     case ID_BTN_DEL_SKIN:
                         if (!app->settings.customSkin.empty()) confirmDeleteSkin(*app, app->settings.customSkin);
                         break;
+                    case ID_BTN_BATCH_DEL_SKIN:
+                        confirmBatchDeleteSkins(*app);
+                        break;
                     case ID_BTN_IMPORT_KB: chooseKeyboardSkinFile(*app); break;
                     case ID_BTN_ROT_ZERO:
                         app->settings.rotationDeg = 0.0f;
@@ -2535,10 +2788,11 @@ void showSettingsWindow(AppState& app) {
     addCtrl(L"BUTTON", tr(L"\u5916\u89C2\u4E0E\u65B9\u5411", L"Appearance & Orientation", L"Aparência e orientação"), BS_GROUPBOX, 14, 10, 512, 264, 0, true);
 
     addCtrl(L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin", L"Skin do gato"), SS_LEFT, 28, 38, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 34, 186, 220, ID_COAT_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4\u2026", L"Wardrobe", L"Provador"), BS_PUSHBUTTON | WS_TABSTOP, 302, 34, 74, 24, ID_BTN_DRESSING);
-    addCtrl(L"BUTTON", tr(L"\u270F \u6539\u540D", L"\u270F Name", L"✏ Nome"), BS_PUSHBUTTON | WS_TABSTOP, 380, 34, 62, 24, ID_BTN_RENAME_SKIN);
-    addCtrl(L"BUTTON", tr(L"\U0001F5D1 \u5220\u9664", L"\U0001F5D1 Del", L"🗑"), BS_OWNERDRAW | WS_TABSTOP, 446, 34, 66, 24, ID_BTN_DEL_SKIN, true);
+    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 34, 148, 220, ID_COAT_COMBO);
+    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4", L"Wardrobe", L"Provador"), BS_PUSHBUTTON | WS_TABSTOP, 262, 34, 60, 24, ID_BTN_DRESSING);
+    addCtrl(L"BUTTON", tr(L"\u6539\u540D", L"Name", L"Nome"), BS_PUSHBUTTON | WS_TABSTOP, 326, 34, 48, 24, ID_BTN_RENAME_SKIN);
+    addCtrl(L"BUTTON", tr(L"\U0001F5D1\u5220", L"Del", L"\U0001F5D1"), BS_OWNERDRAW | WS_TABSTOP, 378, 34, 52, 24, ID_BTN_DEL_SKIN, true);
+    addCtrl(L"BUTTON", tr(L"\u6279\u91CF\u5220\u9664\u2026", L"Batch Del...", L"Várias…"), BS_PUSHBUTTON | WS_TABSTOP, 434, 34, 78, 24, ID_BTN_BATCH_DEL_SKIN);
 
     addCtrl(L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta"), SS_LEFT, 28, 70, 76, 20, 0);
     addCtrl(L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, 110, 70, 178, 20, ID_SKINS_DIR_PATH);
@@ -3099,6 +3353,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
         }
         AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)renameMenu, tr(L"\u270F \u91CD\u547D\u540D\u76AE\u80A4\u2026", L"\u270F Rename Skin...", L"✏ Renomear skin…"));
         AppendMenuW(coatMenu, MF_POPUP, (UINT_PTR)deleteMenu, tr(L"\U0001F5D1 \u5220\u9664\u5DF2\u5BFC\u5165\u76AE\u80A4\u2026", L"\U0001F5D1 Delete Imported Skin...", L"🗑 Excluir skin importada…"));
+        AppendMenuW(coatMenu, MF_STRING, CMD_BATCH_DELETE_SKINS, tr(L"\U0001F4E6 \u6279\u91CF\u5220\u9664\u76AE\u80A4\u2026", L"\U0001F4E6 Batch Delete Skins...", L"📦 Excluir várias skins…"));
     }
     AppendMenuW(coatMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(coatMenu, MF_STRING, CMD_IMPORT_SKIN, tr(L"\u5BFC\u5165\u76AE\u80A4 / \u6362\u88C5\u95F4\u2026", L"Import Skin / Wardrobe...", L"Importar skin / Provador…"));
@@ -3401,6 +3656,9 @@ void showContextMenu(AppState& app, POINT screenPt) {
         case CMD_OPEN_SETTINGS:
             showSettingsWindow(app);
             break;
+        case CMD_BATCH_DELETE_SKINS:
+            confirmBatchDeleteSkins(app);
+            break;
         case CMD_QUIT:
             quitApp(app);
             break;
@@ -3494,7 +3752,8 @@ void tickAndRender(AppState& app) {
     app.physics.step(dt, wr, app.input, app.settings,
                      curSkin.typingStyle == SkinTypingStyle::Douni,
                      curSkin.renderStyle == SkinRenderStyle::Douni,
-                     isClassicBuiltIn);
+                     isClassicBuiltIn,
+                     curSkin.renderStyle == SkinRenderStyle::Beagle);
     if (!physicsLooksSane(app.physics)) {
         // A single non-finite value would otherwise make every later frame draw nothing (the cat
         // "vanishes" until restart). Rebuild the pose but keep the session statistics.
@@ -3520,14 +3779,18 @@ void tickAndRender(AppState& app) {
                 CatHitZone zone = CatRenderer::hitTest(cp, app.physics, activeSkin(app));
                 app.physics.updateTailHover(&cp);
                 if (zone == CatHitZone::Head) {
-                    bool skipPetForHunt = (curSkin.renderStyle == SkinRenderStyle::Douni && app.physics.huntIntensity.value > 0.20f);
+                    bool skipPetForHunt = ((curSkin.renderStyle == SkinRenderStyle::Douni || curSkin.renderStyle == SkinRenderStyle::Beagle) && app.physics.huntIntensity.value > 0.20f);
                     if (!skipPetForHunt && app.hasLastHover) {
                         float d = std::hypot(cp.x - app.lastHoverCanvas.x, cp.y - app.lastHoverCanvas.y);
                         if (d > 1.2f && d < 80.0f) {
                             app.physics.registerPetStroke(cp, d, true, app.settings);
                             if (app.physics.totalPetSessions != app.lastSavedPetSessions) {
                                 app.lastSavedPetSessions = app.physics.totalPetSessions;
-                                CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+                                app.audioThreadStop.store(true, std::memory_order_relaxed);
+    app.audioThreadCv.notify_all();
+    if (app.audioThread.joinable()) app.audioThread.join();
+
+    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
                             }
                         }
                     }
@@ -3571,6 +3834,51 @@ void tickAndRender(AppState& app) {
         }
     }
 
+    RenderedPoseSnapshot curPose;
+    curPose.w = w;
+    curPose.h = h;
+    curPose.skinId = curSkin.id;
+    curPose.kbSkinId = activeKeyboardSkin(app).id;
+    curPose.coatTheme = (int)app.settings.coatTheme;
+    curPose.eyeTheme = (int)app.settings.eyeTheme;
+    curPose.tabletMode = app.settings.tabletMode;
+    curPose.obsCaptureMode = app.settings.obsCaptureMode;
+    curPose.flipHorizontal = app.settings.flipHorizontal;
+    curPose.rotationDeg10 = (int)std::lround(app.settings.rotationDeg * 10.0f);
+    curPose.isEditMode = app.settings.isEditMode;
+    curPose.showKeyOverlay = app.settings.showKeyBadges;
+    curPose.showStats = app.settings.showMouseBadges;
+    curPose.language = app.settings.language;
+    curPose.isMusicPlaying = app.physics.isMusicPlaying;
+    curPose.foregroundBlocksKeys = app.foregroundBlocksKeys;
+    curPose.leftMouseDown = app.input.leftMouseDown;
+    curPose.rightMouseDown = app.input.rightMouseDown;
+    curPose.activeKeyCount = app.input.activeKeys.size();
+    uint64_t kh = 14695981039346656037ULL;
+    for (PhysicalKey k : app.input.activeKeys) {
+        kh ^= (uint64_t)k;
+        kh *= 1099511628211ULL;
+    }
+    curPose.activeKeyHash = kh;
+    curPose.totalKeystrokesToday = app.input.totalKeystrokesToday;
+    curPose.totalPetSessions = app.physics.totalPetSessions;
+    curPose.headY10 = (int)std::lround(app.physics.headOffsetY.value * 10.0f);
+    curPose.leftPawY10 = (int)std::lround(app.physics.leftPaw.y.value * 10.0f);
+    curPose.rightPawY10 = (int)std::lround(app.physics.rightPaw.y.value * 10.0f);
+    curPose.breath100 = (int)std::lround(app.physics.breathingOffset() * 100.0f);
+    curPose.blink100 = (int)std::lround(app.physics.blinkProgress() * 100.0f);
+    curPose.sleep100 = (int)std::lround(app.physics.sleepiness * 100.0f);
+    curPose.tail10 = (int)std::lround(app.physics.tailTip.x.value * 10.0f + app.physics.tailPhase * 10.0f);
+    curPose.purr100 = (int)std::lround(app.physics.petHeadIntensity * 100.0f);
+    curPose.happy100 = (int)std::lround(app.physics.petBodyIntensity * 100.0f);
+    curPose.sparkleCount = (int)app.physics.sparkles.size();
+
+    if (!app.forceRedraw && curPose == app.lastRenderedPose) {
+        return;
+    }
+    app.lastRenderedPose = curPose;
+    app.forceRedraw = false;
+
     // Render 32-bit Premultiplied ARGB frame directly into DIB and present via UpdateLayeredWindow
     app.ensureBuffer(w, h);
     if (!app.memDC || !app.dibBits) return;
@@ -3612,21 +3920,53 @@ void tickAndRender(AppState& app) {
     }
 }
 
-/// Renders at most once per FRAME_INTERVAL; called from both the main loop and WM_TIMER (the latter
+double desiredFrameInterval(const AppState& app, double now) {
+    if (!app.isVisible || app.hiddenByFullscreen) return 0.25; // 4 Hz when hidden
+    bool active = !app.input.activeKeys.empty() ||
+                  app.input.leftMouseDown || app.input.rightMouseDown || app.input.otherMouseDown ||
+                  app.demoActive || app.isDragging || app.activeResizeCorner >= 0 ||
+                  app.isRotating || app.pendingMenuAfterAlt ||
+                  (now - app.input.lastKeyActivityTime < 1.5) ||
+                  (now - app.input.lastMouseMoveTime < 1.5) ||
+                  (now - app.input.lastMouseClickTime < 1.5) ||
+                  app.physics.petHeadIntensity > 0.05f ||
+                  app.physics.petBodyIntensity > 0.05f;
+    if (active) return FRAME_INTERVAL; // 60 Hz when active
+    if (app.physics.sleepiness > 0.5f) return 0.10; // 10 Hz when sleeping
+    return 0.05; // 20 Hz when idle awake
+}
+
+/// Renders at most once per desiredFrameInterval; called from both the main loop and WM_TIMER (the latter
 /// keeps the cat alive while a menu / message box runs its own modal loop).
 void renderIfDue(AppState& app) {
     double now = nowSeconds();
     if (now < app.nextFrameTime) return;
-    app.nextFrameTime = (now - app.nextFrameTime < FRAME_INTERVAL) ? app.nextFrameTime + FRAME_INTERVAL
-                                                                    : now + FRAME_INTERVAL;
+    double interval = desiredFrameInterval(app, now);
+    app.nextFrameTime = (now - app.nextFrameTime < interval) ? app.nextFrameTime + interval
+                                                             : now + interval;
     tickAndRender(app);
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     AppState* app = g_app;
     switch (msg) {
+        case InputEngine::WM_HOOK_KEY_EVENT:
+            if (app) {
+                app->input.drainHookEvents();
+                app->nextFrameTime = std::min(app->nextFrameTime, nowSeconds());
+            }
+            return 0;
         case WM_INPUT:
-            if (app) app->input.handleRawInput(lParam);
+            if (app) {
+                app->input.handleRawInput(lParam);
+                app->nextFrameTime = std::min(app->nextFrameTime, nowSeconds());
+            }
+            return 0;
+        case WM_INPUT_DEVICE_CHANGE:
+            if (app) {
+                app->input.invalidateDeviceCache();
+                app->forceRedraw = true;
+            }
             return 0;
 
         case WM_TIMER:
@@ -4257,7 +4597,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (app.settings.runAsAdmin && !app.isElevated && !noElevate) {
         if (hMutex) { CloseHandle(hMutex); hMutex = nullptr; }
         if (relaunchSelfElevated(L"--takeover --no-elevate")) {
-            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            app.audioThreadStop.store(true, std::memory_order_relaxed);
+    app.audioThreadCv.notify_all();
+    if (app.audioThread.joinable()) app.audioThread.join();
+
+    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
     g_app = nullptr;
             return 0;
         }
@@ -4282,14 +4626,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (today != app.statsDay) {
             app.statsDay = today;
             app.input.totalKeystrokesToday = 1;
-            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            app.audioThreadStop.store(true, std::memory_order_relaxed);
+    app.audioThreadCv.notify_all();
+    if (app.audioThread.joinable()) app.audioThread.join();
+
+    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         } else if (app.input.totalKeystrokesToday % 10 == 0) {
-            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            app.audioThreadStop.store(true, std::memory_order_relaxed);
+    app.audioThreadCv.notify_all();
+    if (app.audioThread.joinable()) app.audioThread.join();
+
+    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         }
         app.physics.triggerKeyDown(k, app.settings, activeSkin(app).typingStyle == SkinTypingStyle::Douni, &app.input.activeKeys);
     };
     app.input.onMouseClick = [&](int btn, bool down) {
-        app.physics.triggerMouseClick(btn, down, app.settings, activeSkin(app).renderStyle == SkinRenderStyle::Douni);
+        app.physics.triggerMouseClick(btn, down, app.settings, activeSkin(app).renderStyle == SkinRenderStyle::Douni || activeSkin(app).renderStyle == SkinRenderStyle::Beagle);
     };
 
     WNDCLASSEXW wc = {};
@@ -4362,7 +4714,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     DragAcceptFiles(app.hwnd, TRUE);   // drop a .kurocat onto the cat to wear it
     allowDropsWhenElevated(app.hwnd);
     app.input.registerRawInput(app.hwnd);
-    app.input.installKeyboardHook();
+    app.input.installKeyboardHook(app.hwnd);
     if (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop) {
         applyOBSMode(app);
     }
@@ -4386,6 +4738,32 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     app.nextFrameTime = nowSeconds() + FRAME_INTERVAL;
     SetTimer(app.hwnd, TIMER_RENDER, 16, nullptr);
 
+    app.audioPollingEnabled.store(app.settings.autoHeadphonesOnMusic, std::memory_order_relaxed);
+    app.audioThread = std::thread([&app]() {
+        HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        double sustainedSince = 0.0;
+        while (!app.audioThreadStop.load(std::memory_order_relaxed)) {
+            if (app.audioPollingEnabled.load(std::memory_order_relaxed)) {
+                double t = nowSeconds();
+                if (isSystemAudioPlaying()) {
+                    if (sustainedSince == 0.0) sustainedSince = t;
+                    app.audioSustainedPlaying.store((t - sustainedSince) >= 1.2, std::memory_order_relaxed);
+                } else {
+                    sustainedSince = 0.0;
+                    app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+                }
+            } else {
+                sustainedSince = 0.0;
+                app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+            }
+            std::unique_lock<std::mutex> lk(app.audioThreadMu);
+            app.audioThreadCv.wait_for(lk, std::chrono::milliseconds(800), [&app]() {
+                return app.audioThreadStop.load(std::memory_order_relaxed);
+            });
+        }
+        if (SUCCEEDED(hrCom)) CoUninitialize();
+    });
+
     // Frame loop. WM_TIMER is only generated when the queue is empty, so a 1000-8000 Hz gaming mouse
     // (one WM_INPUT per report) could starve it and freeze the cat. Here frames are driven by time:
     // drain messages for at most ~10 ms, then render if a frame is due. WM_TIMER still calls
@@ -4395,7 +4773,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     bool running = true;
     while (running) {
         double now = nowSeconds();
-        double waitSec = (app.isVisible && !app.hiddenByFullscreen) ? (app.nextFrameTime - now) : 0.25;
+        double waitSec = std::clamp(app.nextFrameTime - now, 0.0, 0.25);
         if (waitSec > 0.0) {
             MsgWaitForMultipleObjectsEx(0, nullptr, (DWORD)(waitSec * 1000.0), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
@@ -4421,8 +4799,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         housekeeping(app);
     }
 
+    app.audioThreadStop.store(true, std::memory_order_relaxed);
+    app.audioThreadCv.notify_all();
+    if (app.audioThread.joinable()) app.audioThread.join();
+
     CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
     g_app = nullptr;
+    CatRenderer::cleanupGdiplusCaches();
     Gdiplus::GdiplusShutdown(gdipToken);
     if (SUCCEEDED(comHr)) CoUninitialize();
     if (hMutex) CloseHandle(hMutex);

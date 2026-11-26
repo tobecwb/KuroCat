@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <string>
 #include <thread>
+#include <atomic>
 #include <vector>
 #include <algorithm>
 #include <unistd.h>
@@ -38,7 +39,7 @@ static inline const char* tr(const char* zh, const char* en, const char* pt) { r
 #include <fcntl.h>
 #include <glib-unix.h>
 
-#define KUROCAT_VERSION_STR "1.5.1"
+#define KUROCAT_VERSION_STR "1.5.2"
 static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
@@ -75,6 +76,7 @@ struct LinuxApp {
     GtkWidget* settingsWindow = nullptr;
     GtkWidget* setCoatCombo = nullptr;
     GtkWidget* setDeleteSkinBtn = nullptr;
+    GtkWidget* setBatchDeleteSkinBtn = nullptr;
     GtkWidget* setSkinsDirLabel = nullptr;
     GtkWidget* setResetSkinsDirBtn = nullptr;
     GtkWidget* setEyeCombo = nullptr;
@@ -398,7 +400,7 @@ static void updateInputShape(LinuxApp& app) {
     if (std::fabs(app.settings.rotationDeg) > 1.0f) {
         cairo_rectangle_int_t rotBox = { (int)(28 * s), (int)(24 * s), (int)(304 * s), (int)(272 * s) };
         cairo_region_union_rectangle(reg, &rotBox);
-    } else if (activeSkin(app).renderStyle == SkinRenderStyle::Douni) {
+    } else if (activeSkin(app).renderStyle == SkinRenderStyle::Douni || activeSkin(app).renderStyle == SkinRenderStyle::Beagle) {
         int headX = app.settings.flipHorizontal ? (int)(32 * s) : (int)(168 * s);
         cairo_rectangle_int_t headBox = { headX, (int)(64 * s), (int)(160 * s), (int)(120 * s) };
         cairo_rectangle_int_t bodyBox = { (int)(20 * s), (int)(116 * s), (int)(320 * s), (int)(168 * s) };
@@ -451,9 +453,12 @@ static bool isOtherWindowFullscreen(LinuxApp& app) {
     if (!gdkDpy || !GDK_IS_X11_DISPLAY(gdkDpy)) return false;
     Display* dpy = gdk_x11_display_get_xdisplay(gdkDpy);
     if (!dpy) return false;
-    Atom netActive = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", True);
-    Atom netWmState = XInternAtom(dpy, "_NET_WM_STATE", True);
-    Atom netWmFs = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", True);
+    static Atom netActive = 0;
+    static Atom netWmState = 0;
+    static Atom netWmFs = 0;
+    if (!netActive) netActive = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", True);
+    if (!netWmState) netWmState = XInternAtom(dpy, "_NET_WM_STATE", True);
+    if (!netWmFs) netWmFs = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", True);
     if (!netActive || !netWmState || !netWmFs) return false;
 
     Atom actualType = 0;
@@ -1328,6 +1333,137 @@ static void confirmDeleteSkin(const std::string& id) {
     refreshSettingsWindow(*g_app);
 }
 
+static void confirmBatchDeleteSkins() {
+    LinuxApp& app = *g_app;
+    if (app.skins.skins.empty()) {
+        showMessage(GTK_MESSAGE_INFO, "KuroCat", tr("暂无已导入的自定义皮肤。", "No imported custom skins yet.", "Nenhuma skin importada ainda."));
+        return;
+    }
+
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        tr("批量删除已导入皮肤", "Batch Delete Imported Skins", "Excluir várias skins importadas"),
+        app.settingsWindow ? GTK_WINDOW(app.settingsWindow) : nullptr,
+        GTK_DIALOG_MODAL,
+        tr("取消", "Cancel", "Cancelar"), GTK_RESPONSE_CANCEL,
+        tr("删除所选", "Delete Selected", "Excluir selecionadas"), GTK_RESPONSE_ACCEPT,
+        nullptr);
+    gtk_window_set_default_size(GTK_WINDOW(dlg), 420, 440);
+    gtk_window_set_keep_above(GTK_WINDOW(dlg), TRUE);
+
+    GtkWidget* area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    gtk_container_set_border_width(GTK_CONTAINER(area), 12);
+    gtk_box_set_spacing(GTK_BOX(area), 8);
+
+    GtkWidget* tip = gtk_label_new(tr("勾选要批量删除的 .kurocat 皮肤（内置猫咪不受影响）：",
+                                      "Check imported .kurocat skins to remove (built-in cats stay safe):", "Marque as skins .kurocat importadas que quer excluir (as nativas não são afetadas):"));
+    gtk_widget_set_halign(tip, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(area), tip, FALSE, FALSE, 0);
+
+    struct BatchRow { std::string id; GtkWidget* chk; };
+    struct BatchCtx {
+        std::vector<BatchRow> rows;
+        GtkWidget* delBtn = nullptr;
+        GtkWidget* countLbl = nullptr;
+    } ctx;
+    ctx.delBtn = gtk_dialog_get_widget_for_response(GTK_DIALOG(dlg), GTK_RESPONSE_ACCEPT);
+
+    GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget* btnAll = gtk_button_new_with_label(tr("全选", "All", "Todas"));
+    GtkWidget* btnNone = gtk_button_new_with_label(tr("清空", "Clear", "Nenhuma"));
+    ctx.countLbl = gtk_label_new("");
+    gtk_widget_set_halign(ctx.countLbl, GTK_ALIGN_END);
+    gtk_box_pack_start(GTK_BOX(bar), btnAll, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar), btnNone, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(bar), ctx.countLbl, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(area), bar, FALSE, FALSE, 0);
+
+    GtkWidget* scroller = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_vexpand(scroller, TRUE);
+    GtkWidget* listBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(listBox), 4);
+    gtk_container_add(GTK_CONTAINER(scroller), listBox);
+    gtk_box_pack_start(GTK_BOX(area), scroller, TRUE, TRUE, 0);
+
+    auto updateUi = +[](BatchCtx* c) {
+        int sel = 0;
+        for (const auto& r : c->rows) {
+            if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(r.chk))) ++sel;
+        }
+        char buf[64];
+        std::snprintf(buf, sizeof buf, tr("已选 %d / %zu", "Selected: %d / %zu", "Selecionadas: %d / %zu"), sel, c->rows.size());
+        gtk_label_set_text(GTK_LABEL(c->countLbl), buf);
+        if (c->delBtn) gtk_widget_set_sensitive(c->delBtn, sel > 0 ? TRUE : FALSE);
+    };
+
+    for (const SkinSpec& s : app.skins.skins) {
+        std::string label = s.name;
+        if (s.id == app.settings.customSkin) label += tr(" [正在穿]", " [Active]", " [em uso]");
+        if (!s.author.empty()) label += " · " + s.author;
+        GtkWidget* chk = gtk_check_button_new_with_label(label.c_str());
+        g_signal_connect(chk, "toggled", G_CALLBACK(+[](GtkToggleButton*, gpointer data) {
+            auto* c = (BatchCtx*)data;
+            int sel = 0;
+            for (const auto& r : c->rows) if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(r.chk))) ++sel;
+            char buf[64];
+            std::snprintf(buf, sizeof buf, tr("已选 %d / %zu", "Selected: %d / %zu", "Selecionadas: %d / %zu"), sel, c->rows.size());
+            gtk_label_set_text(GTK_LABEL(c->countLbl), buf);
+            if (c->delBtn) gtk_widget_set_sensitive(c->delBtn, sel > 0 ? TRUE : FALSE);
+        }), &ctx);
+        gtk_box_pack_start(GTK_BOX(listBox), chk, FALSE, FALSE, 0);
+        ctx.rows.push_back({s.id, chk});
+    }
+
+    g_signal_connect(btnAll, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        auto* c = (BatchCtx*)data;
+        for (const auto& r : c->rows) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(r.chk), TRUE);
+    }), &ctx);
+    g_signal_connect(btnNone, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        auto* c = (BatchCtx*)data;
+        for (const auto& r : c->rows) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(r.chk), FALSE);
+    }), &ctx);
+
+    updateUi(&ctx);
+    gtk_widget_show_all(dlg);
+    int response = gtk_dialog_run(GTK_DIALOG(dlg));
+    std::vector<std::string> selectedIds;
+    if (response == GTK_RESPONSE_ACCEPT) {
+        for (const auto& r : ctx.rows) {
+            if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(r.chk))) selectedIds.push_back(r.id);
+        }
+    }
+    gtk_widget_destroy(dlg);
+    if (selectedIds.empty()) return;
+
+    GtkWidget* ask = gtk_message_dialog_new(
+        app.settingsWindow ? GTK_WINDOW(app.settingsWindow) : nullptr,
+        GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+        tr("确认批量删除这 %zu 款皮肤？", "Delete %zu selected skin(s)?", "Excluir %zu skin(s) selecionada(s)?"), selectedIds.size());
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(ask),
+        tr("会从皮肤文件夹里删除对应 .kurocat 文件，删除后需要重新导入。",
+           "Selected .kurocat files will be removed from the skins folder.", "Os arquivos .kurocat selecionados serão apagados da pasta de skins; para usá-los de novo será preciso importar outra vez."));
+    gtk_dialog_add_buttons(GTK_DIALOG(ask), tr("取消", "Cancel", "Cancelar"), GTK_RESPONSE_CANCEL,
+                           tr("全部删除", "Delete", "Excluir"), GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_window_set_title(GTK_WINDOW(ask), "KuroCat");
+    gtk_window_set_keep_above(GTK_WINDOW(ask), TRUE);
+    int okDel = gtk_dialog_run(GTK_DIALOG(ask));
+    gtk_widget_destroy(ask);
+    if (okDel != GTK_RESPONSE_ACCEPT) return;
+
+    std::vector<std::string> failed;
+    std::vector<std::string> removed = app.skins.removeMany(selectedIds, &failed);
+    if (std::find(removed.begin(), removed.end(), app.settings.customSkin) != removed.end()) {
+        selectCustomSkin(app, "");
+    }
+    if (!failed.empty()) {
+        char warnBuf[128];
+        std::snprintf(warnBuf, sizeof warnBuf, tr("已删除 %zu 款，有 %zu 款文件未能删除。", "Deleted %zu, failed %zu.", "Excluídas: %zu; com falha: %zu."), removed.size(), failed.size());
+        showMessage(GTK_MESSAGE_WARNING, tr("部分删除失败", "Partial Failure", "Falha parcial"), warnBuf);
+    }
+    refreshDressingRoom(app);
+    refreshSettingsWindow(app);
+}
+
 static void confirmDeleteKeyboardSkin(const std::string& id) {
     const KeyboardSkinSpec* kb = g_app->kbLibrary.find(id);
     if (!kb) return;
@@ -1450,6 +1586,9 @@ static void refreshSettingsWindow(LinuxApp& app) {
         bool hasCustom = !app.settings.customSkin.empty() && app.skins.find(app.settings.customSkin) != nullptr;
         gtk_widget_set_sensitive(app.setDeleteSkinBtn, hasCustom ? TRUE : FALSE);
     }
+    if (app.setBatchDeleteSkinBtn) {
+        gtk_widget_set_sensitive(app.setBatchDeleteSkinBtn, !app.skins.skins.empty() ? TRUE : FALSE);
+    }
     if (app.setDeleteKbBtn) {
         bool hasCustomKb = !app.settings.customKeyboard.empty() && app.kbLibrary.find(app.settings.customKeyboard) != nullptr;
         gtk_widget_set_sensitive(app.setDeleteKbBtn, hasCustomKb ? TRUE : FALSE);
@@ -1499,7 +1638,7 @@ static void showSettingsWindow() {
 
     g_signal_connect(win, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {
         g_app->settingsWindow = nullptr;
-        g_app->setCoatCombo = g_app->setDeleteSkinBtn = g_app->setSkinsDirLabel = g_app->setResetSkinsDirBtn = g_app->setEyeCombo = g_app->setKbCombo = g_app->setDeleteKbBtn = nullptr;
+        g_app->setCoatCombo = g_app->setDeleteSkinBtn = g_app->setBatchDeleteSkinBtn = g_app->setSkinsDirLabel = g_app->setResetSkinsDirBtn = g_app->setEyeCombo = g_app->setKbCombo = g_app->setDeleteKbBtn = nullptr;
         g_app->setScaleSlider = g_app->setScaleLabel = g_app->setRotSlider = g_app->setRotLabel = nullptr;
         g_app->setFlipChk = g_app->setOutlineChk = g_app->setAngerChk = g_app->setPetChk = nullptr;
         g_app->setBadgesChk = g_app->setMouseBadgesChk = g_app->setLegendsChk = g_app->setMarqueeChk = g_app->setLevelKeyboardChk = g_app->setTypingLimbCombo = nullptr;
@@ -1569,8 +1708,13 @@ static void showSettingsWindow() {
         g_signal_connect(app.setDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
             if (!g_app->settings.customSkin.empty()) confirmDeleteSkin(g_app->settings.customSkin);
         }), nullptr);
+        app.setBatchDeleteSkinBtn = gtk_button_new_with_label(tr("批量删除…", "Batch…", "Várias…"));
+        g_signal_connect(app.setBatchDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+            confirmBatchDeleteSkins();
+        }), nullptr);
         gtk_box_pack_start(GTK_BOX(coatActions), dressBtn, TRUE, TRUE, 0);
         gtk_box_pack_start(GTK_BOX(coatActions), app.setDeleteSkinBtn, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(coatActions), app.setBatchDeleteSkinBtn, FALSE, FALSE, 0);
         gtk_grid_attach(GTK_GRID(g), coatActions, 2, r++, 1, 1);
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("皮肤目录", "Skins Dir", "Pasta")), 0, r, 1, 1);
@@ -2071,6 +2215,10 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
             GtkWidget* delParent = gtk_menu_item_new_with_label(tr("删除已导入皮肤…", "Delete Imported Skin…", "Excluir skin importada…"));
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(delParent), delSub);
             gtk_menu_shell_append(GTK_MENU_SHELL(sub), delParent);
+
+            GtkWidget* batchDelItem = gtk_menu_item_new_with_label(tr("📦 批量删除皮肤…", "📦 Batch Delete Skins…", "📦 Excluir várias skins…"));
+            g_signal_connect(batchDelItem, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { confirmBatchDeleteSkins(); }), nullptr);
+            gtk_menu_shell_append(GTK_MENU_SHELL(sub), batchDelItem);
         }
         GtkWidget* importItem = gtk_menu_item_new_with_label(tr("导入皮肤 / 换装间…", "Import Skin / Wardrobe…", "Importar skin / Provador…"));
         g_signal_connect(importItem, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { showDressingRoom(); }), nullptr);
@@ -2521,6 +2669,44 @@ static bool isMprisMusicPlaying() {
     return playing;
 }
 
+static std::atomic<bool> g_musicPollerRunning{false};
+static std::atomic<bool> g_musicCheckEnabled{false};
+static std::atomic<bool> g_musicPlayingCached{false};
+static std::thread g_musicPollerThread;
+
+static void startMusicPoller() {
+    if (g_musicPollerRunning.exchange(true)) return;
+    g_musicPollerThread = std::thread([]() {
+        double audioSustainedSince = 0.0;
+        while (g_musicPollerRunning.load()) {
+            if (!g_musicCheckEnabled.load()) {
+                audioSustainedSince = 0.0;
+                g_musicPlayingCached.store(false);
+            } else {
+                double now = nowSeconds();
+                if (isMprisMusicPlaying()) {
+                    audioSustainedSince = now - 2.0;
+                    g_musicPlayingCached.store(true);
+                } else if (isAlsaPlaybackRunning()) {
+                    if (audioSustainedSince == 0.0) audioSustainedSince = now;
+                    g_musicPlayingCached.store((now - audioSustainedSince) >= 1.2);
+                } else {
+                    audioSustainedSince = 0.0;
+                    g_musicPlayingCached.store(false);
+                }
+            }
+            for (int i = 0; i < 9 && g_musicPollerRunning.load(); ++i) {
+                usleep(100 * 1000);
+            }
+        }
+    });
+}
+
+static void stopMusicPoller() {
+    g_musicPollerRunning.store(false);
+    if (g_musicPollerThread.joinable()) g_musicPollerThread.join();
+}
+
 static gboolean onFrameTick(gpointer);
 
 static void scheduleFrames(guint intervalMs) {
@@ -2562,24 +2748,8 @@ static gboolean onFrameTick(gpointer) {
             }
         }
         keepPetVisibleOnShowDesktop(*g_app);
-        static double s_nextMusicCheck = 0.0;
-        static double s_audioSustainedSince = 0.0;
-        if (!g_app->settings.autoHeadphonesOnMusic) {
-            s_audioSustainedSince = 0.0;
-            g_app->physics.isMusicPlaying = false;
-        } else if (now >= s_nextMusicCheck) {
-            s_nextMusicCheck = now + 0.9;
-            if (isMprisMusicPlaying()) {
-                s_audioSustainedSince = now - 2.0;
-                g_app->physics.isMusicPlaying = true;
-            } else if (isAlsaPlaybackRunning()) {
-                if (s_audioSustainedSince == 0.0) s_audioSustainedSince = now;
-                g_app->physics.isMusicPlaying = (now - s_audioSustainedSince) >= 1.2;
-            } else {
-                s_audioSustainedSince = 0.0;
-                g_app->physics.isMusicPlaying = false;
-            }
-        }
+        g_musicCheckEnabled.store(g_app->settings.autoHeadphonesOnMusic);
+        g_app->physics.isMusicPlaying = g_app->settings.autoHeadphonesOnMusic ? g_musicPlayingCached.load() : false;
     }
     if (g_app->hiddenByFullscreen) {
         guint want = desiredFrameIntervalMs(*g_app);
@@ -2655,7 +2825,7 @@ static gboolean onFrameTick(gpointer) {
             CatHitZone zone = CatRenderer::hitTest(cp, g_app->physics, activeSkin(*g_app));
             g_app->physics.updateTailHover(&cp);
             if (zone == CatHitZone::Head) {
-                bool skipPetForHunt = (activeSkin(*g_app).renderStyle == SkinRenderStyle::Douni
+                bool skipPetForHunt = ((activeSkin(*g_app).renderStyle == SkinRenderStyle::Douni || activeSkin(*g_app).renderStyle == SkinRenderStyle::Beagle)
                     && g_app->physics.huntIntensity.value > 0.20f);
                 if (!skipPetForHunt && g_app->hasLastHover) {
                     float d = std::hypot(cp.x - g_app->lastHoverCanvas.x, cp.y - g_app->lastHoverCanvas.y);
@@ -2686,9 +2856,102 @@ static gboolean onFrameTick(gpointer) {
         g_app->physics.step(dt / (float)substeps, (float)winX, (float)winY, (float)winW,
                             g_app->input, g_app->settings, curSkin.typingStyle, curSkin.renderStyle, isClassicBuiltIn);
     }
-    gtk_widget_queue_draw(g_app->drawArea);
+
+    // Idle dirty-check: skip gtk_widget_queue_draw when completely static to achieve 0fps idle redraw.
+    struct RenderedPoseSnapshot {
+        bool valid = false;
+        int winW = 0, winH = 0;
+        std::string skinId;
+        std::string kbSkinId;
+        float scale = 0.0f, rotationDeg = 0.0f;
+        bool flipHorizontal = false, isEditMode = false, showKeyBadges = false, showMouseBadges = false;
+        int obsCaptureMode = 0;
+        bool isMusicPlaying = false;
+        size_t activeKeyCount = 0;
+        uint64_t activeKeyHash = 0;
+        bool lmb = false, rmb = false, omb = false;
+        float cursorX = 0.0f, cursorY = 0.0f;
+        float sleepiness = 0.0f, breathOffset = 0.0f, blinkProg = 0.0f;
+        float earTwitch = 0.0f;
+        float hunt = 0.0f, dizzy = 0.0f, anger = 0.0f, petHead = 0.0f, petBody = 0.0f;
+        size_t floatingKeycaps = 0, tabletTrail = 0;
+    };
+    static RenderedPoseSnapshot s_lastDrawn;
 
     guint want = desiredFrameIntervalMs(*g_app);
+    uint64_t keyHash = 14695981039346656037ULL;
+    for (auto k : g_app->input.activeKeys) {
+        keyHash ^= (uint64_t)k;
+        keyHash *= 1099511628211ULL;
+    }
+    const auto& ph = g_app->physics;
+    const auto& st = g_app->settings;
+    const std::string& kbId = activeKeyboardSkin(*g_app).id;
+    auto nearEq = [](float a, float b) { return std::fabs(a - b) <= 0.001f; };
+
+    bool dirty = !s_lastDrawn.valid
+        || want < 50
+        || g_app->isDragging || g_app->isRotating || g_app->activeResizeCorner >= 0 || g_app->demoActive
+        || s_lastDrawn.winW != winW || s_lastDrawn.winH != winH
+        || s_lastDrawn.skinId != curSkin.id || s_lastDrawn.kbSkinId != kbId
+        || !nearEq(s_lastDrawn.scale, st.scale) || !nearEq(s_lastDrawn.rotationDeg, st.rotationDeg)
+        || s_lastDrawn.flipHorizontal != st.flipHorizontal
+        || s_lastDrawn.isEditMode != st.isEditMode
+        || s_lastDrawn.showKeyBadges != st.showKeyBadges
+        || s_lastDrawn.showMouseBadges != st.showMouseBadges
+        || s_lastDrawn.obsCaptureMode != st.obsCaptureMode
+        || s_lastDrawn.isMusicPlaying != ph.isMusicPlaying
+        || s_lastDrawn.activeKeyCount != g_app->input.activeKeys.size()
+        || s_lastDrawn.activeKeyHash != keyHash
+        || s_lastDrawn.lmb != g_app->input.leftMouseDown
+        || s_lastDrawn.rmb != g_app->input.rightMouseDown
+        || s_lastDrawn.omb != g_app->input.otherMouseDown
+        || std::fabs(s_lastDrawn.cursorX - g_app->input.lastCursorPos.x) > 0.5f
+        || std::fabs(s_lastDrawn.cursorY - g_app->input.lastCursorPos.y) > 0.5f
+        || !nearEq(s_lastDrawn.sleepiness, ph.sleepiness)
+        || !nearEq(s_lastDrawn.breathOffset, ph.breathingOffset())
+        || !nearEq(s_lastDrawn.blinkProg, ph.blinkProgress())
+        || !nearEq(s_lastDrawn.earTwitch, ph.earTwitch.value)
+        || !nearEq(s_lastDrawn.hunt, ph.huntIntensity.value)
+        || !nearEq(s_lastDrawn.dizzy, ph.dizzyIntensity.value)
+        || !nearEq(s_lastDrawn.anger, ph.angerIntensity.value)
+        || !nearEq(s_lastDrawn.petHead, ph.petHeadIntensity)
+        || !nearEq(s_lastDrawn.petBody, ph.petBodyIntensity)
+        || s_lastDrawn.floatingKeycaps != ph.floatingKeycaps.size()
+        || s_lastDrawn.tabletTrail != ph.tabletTrail.size();
+
+    if (dirty) {
+        s_lastDrawn.valid = true;
+        s_lastDrawn.winW = winW; s_lastDrawn.winH = winH;
+        s_lastDrawn.skinId = curSkin.id; s_lastDrawn.kbSkinId = kbId;
+        s_lastDrawn.scale = st.scale; s_lastDrawn.rotationDeg = st.rotationDeg;
+        s_lastDrawn.flipHorizontal = st.flipHorizontal;
+        s_lastDrawn.isEditMode = st.isEditMode;
+        s_lastDrawn.showKeyBadges = st.showKeyBadges;
+        s_lastDrawn.showMouseBadges = st.showMouseBadges;
+        s_lastDrawn.obsCaptureMode = st.obsCaptureMode;
+        s_lastDrawn.isMusicPlaying = ph.isMusicPlaying;
+        s_lastDrawn.activeKeyCount = g_app->input.activeKeys.size();
+        s_lastDrawn.activeKeyHash = keyHash;
+        s_lastDrawn.lmb = g_app->input.leftMouseDown;
+        s_lastDrawn.rmb = g_app->input.rightMouseDown;
+        s_lastDrawn.omb = g_app->input.otherMouseDown;
+        s_lastDrawn.cursorX = g_app->input.lastCursorPos.x;
+        s_lastDrawn.cursorY = g_app->input.lastCursorPos.y;
+        s_lastDrawn.sleepiness = ph.sleepiness;
+        s_lastDrawn.breathOffset = ph.breathingOffset();
+        s_lastDrawn.blinkProg = ph.blinkProgress();
+        s_lastDrawn.earTwitch = ph.earTwitch.value;
+        s_lastDrawn.hunt = ph.huntIntensity.value;
+        s_lastDrawn.dizzy = ph.dizzyIntensity.value;
+        s_lastDrawn.anger = ph.angerIntensity.value;
+        s_lastDrawn.petHead = ph.petHeadIntensity;
+        s_lastDrawn.petBody = ph.petBodyIntensity;
+        s_lastDrawn.floatingKeycaps = ph.floatingKeycaps.size();
+        s_lastDrawn.tabletTrail = ph.tabletTrail.size();
+        gtk_widget_queue_draw(g_app->drawArea);
+    }
+
     if (want != g_frameIntervalMs) {
         scheduleFrames(want);
         return G_SOURCE_REMOVE;
@@ -2852,10 +3115,12 @@ int main(int argc, char** argv) {
     refreshWindowGeometry(app);
 
     app.lastTickTime = nowSeconds();
+    startMusicPoller();
     scheduleFrames(desiredFrameIntervalMs(app));
     // PT-BR fork: no automatic update check (the updater installs unverified binaries from a third-party mirror).
 
     gtk_main();
+    stopMusicPoller();
     CatSettings::saveStats(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
     app.input.stop();
     releaseSingleInstance();

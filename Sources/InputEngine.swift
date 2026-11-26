@@ -906,10 +906,14 @@ final class InputEngine {
 
     // MARK: - Daily Stats Persistence
 
-    private func todayString() -> String {
+    private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        return f
+    }()
+
+    private func todayString() -> String {
+        Self.dayFormatter.string(from: Date())
     }
 
     private func loadStats() {

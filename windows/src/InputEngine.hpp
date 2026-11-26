@@ -10,6 +10,9 @@
 #include <chrono>
 #include <string>
 #include <cwctype>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include "KeyMap.hpp"
 
 /// High-precision monotonic clock in seconds.
@@ -40,7 +43,9 @@ public:
 
     int totalKeystrokesToday = 0;
     bool isRawInputRegistered = false;
-    HHOOK kbHook_ = nullptr;
+    HHOOK kbHook_ = nullptr; // kept for compatibility; managed on hookThread_
+    static constexpr UINT WM_HOOK_KEY_EVENT = WM_APP + 61;
+    static constexpr UINT WM_HOOK_REINSTALL = WM_APP + 62;
 
     std::function<void(PhysicalKey)> onKeyDown;
     std::function<void(PhysicalKey)> onKeyUp;
@@ -57,25 +62,85 @@ public:
                 USHORT flags = (kb->flags & LLKHF_EXTENDED) ? RI_KEY_E0 : 0;
                 PhysicalKey key = mapRawInputKey((USHORT)kb->scanCode, flags, (USHORT)kb->vkCode);
                 if (key != PhysicalKey::None) {
-                    s_hookInstance->setRawKeyState(key, isDown);
+                    s_hookInstance->enqueueHookKeyEvent(key, isDown);
                 }
             }
         }
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
 
-    void installKeyboardHook() {
-        if (kbHook_) return;
+    ~InputEngine() {
+        uninstallKeyboardHook();
+    }
+
+    void installKeyboardHook(HWND notifyHwnd = nullptr) {
+        if (notifyHwnd) hookNotifyHwnd_.store(notifyHwnd, std::memory_order_relaxed);
         s_hookInstance = this;
-        kbHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+        if (hookThread_.joinable()) {
+            DWORD tid = hookThreadId_.load(std::memory_order_acquire);
+            if (tid != 0 && !kbHookActive_.load(std::memory_order_acquire)) {
+                PostThreadMessageW(tid, WM_HOOK_REINSTALL, 0, 0);
+            }
+            return;
+        }
+        hookThreadId_.store(0, std::memory_order_relaxed);
+        hookThread_ = std::thread([this]() {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            MSG msg = {};
+            PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+            hookThreadId_.store(GetCurrentThreadId(), std::memory_order_release);
+
+            HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+            kbHook_ = hook;
+            kbHookActive_.store(hook != nullptr, std::memory_order_release);
+
+            while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+                if (msg.message == WM_HOOK_REINSTALL && !hook) {
+                    hook = SetWindowsHookExW(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+                    kbHook_ = hook;
+                    kbHookActive_.store(hook != nullptr, std::memory_order_release);
+                }
+            }
+            if (hook) {
+                UnhookWindowsHookEx(hook);
+                hook = nullptr;
+            }
+            kbHook_ = nullptr;
+            kbHookActive_.store(false, std::memory_order_release);
+            hookThreadId_.store(0, std::memory_order_release);
+        });
     }
 
     void uninstallKeyboardHook() {
-        if (kbHook_) {
-            UnhookWindowsHookEx(kbHook_);
-            kbHook_ = nullptr;
+        if (hookThread_.joinable()) {
+            DWORD tid = hookThreadId_.load(std::memory_order_acquire);
+            if (tid != 0) {
+                PostThreadMessageW(tid, WM_QUIT, 0, 0);
+            } else {
+                for (int i = 0; i < 50; ++i) {
+                    tid = hookThreadId_.load(std::memory_order_acquire);
+                    if (tid != 0) {
+                        PostThreadMessageW(tid, WM_QUIT, 0, 0);
+                        break;
+                    }
+                    Sleep(1);
+                }
+            }
+            hookThread_.join();
         }
         if (s_hookInstance == this) s_hookInstance = nullptr;
+    }
+
+    void drainHookEvents() {
+        std::vector<HookKeyEvent> local;
+        {
+            std::lock_guard<std::mutex> lk(hookQueueMu_);
+            if (hookQueue_.empty()) return;
+            local.swap(hookQueue_);
+        }
+        for (const HookKeyEvent& ev : local) {
+            setRawKeyState(ev.key, ev.isDown);
+        }
     }
 
     bool registerRawInput(HWND hwnd) {
@@ -313,11 +378,22 @@ public:
             if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   { lastRawOtherBtnTime_ = now; updateMouseButton(2, false); }
             if (m.usButtonFlags & RI_MOUSE_WHEEL)              lastMouseMoveTime = now;
         } else if (raw->header.dwType == RIM_TYPEHID) {
-            if (raw->data.hid.dwSizeHid > 0 && raw->data.hid.dwCount > 0 &&
-                isVerifiedPenEventDevice(raw->header.hDevice)) {
-                double now = nowSeconds();
-                lastTabletEventTime_ = now;
-                lastMouseMoveTime = now;
+            if (raw->data.hid.dwSizeHid > 0 && raw->data.hid.dwCount > 0) {
+                HANDLE hDev = raw->header.hDevice;
+                auto it = verifiedPenDeviceCache_.find(hDev);
+                bool isPen = false;
+                if (it != verifiedPenDeviceCache_.end()) {
+                    isPen = it->second;
+                } else {
+                    if (verifiedPenDeviceCache_.size() > 64) verifiedPenDeviceCache_.clear();
+                    isPen = isVerifiedPenEventDevice(hDev);
+                    verifiedPenDeviceCache_[hDev] = isPen;
+                }
+                if (isPen) {
+                    double now = nowSeconds();
+                    lastTabletEventTime_ = now;
+                    lastMouseMoveTime = now;
+                }
             }
         }
     }
@@ -363,11 +439,39 @@ public:
         return (int)recentKeyTimes_.size() * 6;
     }
 
+    void invalidateDeviceCache() {
+        verifiedPenDeviceCache_.clear();
+    }
+
 private:
+    struct HookKeyEvent {
+        PhysicalKey key;
+        bool isDown;
+    };
+
+    void enqueueHookKeyEvent(PhysicalKey key, bool isDown) {
+        {
+            std::lock_guard<std::mutex> lk(hookQueueMu_);
+            if (hookQueue_.size() < 256) {
+                hookQueue_.push_back({key, isDown});
+            }
+        }
+        HWND h = hookNotifyHwnd_.load(std::memory_order_relaxed);
+        if (h) PostMessageW(h, WM_HOOK_KEY_EVENT, 0, 0);
+    }
+
+    std::thread hookThread_;
+    std::atomic<DWORD> hookThreadId_{0};
+    std::atomic<bool> kbHookActive_{false};
+    std::atomic<HWND> hookNotifyHwnd_{nullptr};
+    std::mutex hookQueueMu_;
+    std::vector<HookKeyEvent> hookQueue_;
+
     std::deque<double> recentKeyTimes_;
     std::unordered_set<PhysicalKey> rawKeys_;
     std::unordered_set<PhysicalKey> asyncKeys_;
     std::unordered_map<PhysicalKey, double> rawKeyDownTime_;
+    std::unordered_map<HANDLE, bool> verifiedPenDeviceCache_;
     double lastRawKbTime_ = 0.0;
     double lastRawMouseTime_ = 0.0;
     double lastRawLeftBtnTime_ = 0.0;

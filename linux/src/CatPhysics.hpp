@@ -539,7 +539,7 @@ public:
         sleepiness = 0.0f;
         if (isDown) {
             double now = nowSeconds();
-            if (renderStyle == SkinRenderStyle::Douni) {
+            if (renderStyle == SkinRenderStyle::Douni || renderStyle == SkinRenderStyle::Beagle) {
                 douniSlapTimer = 0.0f;
                 douniLeftRaise.target = 0.0f;
                 douniRightRaise.target = 0.0f;
@@ -1001,6 +1001,7 @@ public:
 
         bool isDouniTyping = (typingStyle == SkinTypingStyle::Douni);
         bool isDouniSkin = (renderStyle == SkinRenderStyle::Douni);
+        bool isBeagleSkin = (renderStyle == SkinRenderStyle::Beagle);
         if (isDouniTyping) {
             douniSlapTimer = std::max(0.0f, douniSlapTimer - dt);
             bool leftHeldNow = false;
@@ -1036,11 +1037,12 @@ public:
             douniRightRaise.target = 0.0f;
             kbImpactY.value = 0.0f; kbImpactTilt.value = 0.0f; kbSparkTimer = 0.0f;
         }
-        if (isDouniSkin) {
-            // Deliberate petting threshold (avoids abrupt hijacking on 1px cursor brush or fast hunting whip!) + silky Disney ease spring
-            bool wantsLoaf = !isScruffDragging_ && scruff < 0.08f && dizzy < 0.15f && hunt < 0.22f
-                && (petHeadIntensity > 0.30f || isCurrentlyPetting_ || petBodyIntensity > 0.35f || sleepiness > 0.48f);
-            douniLoafBlend.target = wantsLoaf ? 1.0f : 0.0f;
+        if (isDouniSkin || isBeagleSkin) {
+            bool wantsLoaf = isBeagleSkin
+                ? (!isScruffDragging_ && scruff < 0.08f && (lie > 0.45f || sleepiness > 0.48f))
+                : (!isScruffDragging_ && scruff < 0.08f && dizzy < 0.15f && hunt < 0.22f
+                    && (petHeadIntensity > 0.30f || isCurrentlyPetting_ || petBodyIntensity > 0.35f || sleepiness > 0.48f));
+            douniLoafBlend.target = (!isBeagleSkin && wantsLoaf) ? 1.0f : 0.0f;
             douniLoafBlend.step(dt, 52.0f, 13.5f);
             bool typingNow = (douniSlapTimer > 0.04f || !activeKeys.empty());
             bool tabletUsed = isTabletActive && (engine.leftMouseDown || mouseActivelyUsed);

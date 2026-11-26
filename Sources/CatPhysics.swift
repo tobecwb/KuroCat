@@ -668,7 +668,7 @@ final class CatPhysics {
         sleepiness = 0
         if isDown {
             let now = CACurrentMediaTime()
-            if CatSettings.shared.activeSkin.renderStyle == .douni {
+            if CatSettings.shared.activeSkin.renderStyle == .douni || CatSettings.shared.activeSkin.renderStyle == .beagle {
                 douniSlapTimer = 0
                 douniLeftRaise.target = 0
                 douniRightRaise.target = 0
@@ -1210,6 +1210,7 @@ final class CatPhysics {
 
         let isDouniTyping = activeSkin.typingStyle == .douni
         let isDouniSkin = activeSkin.renderStyle == .douni
+        let usesDouniDesk = isDouniSkin || activeSkin.renderStyle == .beagle
         if isDouniTyping {
             douniSlapTimer = max(0, douniSlapTimer - dt)
             let leftHeldNow = activeKeys.contains { $0.prefersLeftPaw }
@@ -1241,10 +1242,12 @@ final class CatPhysics {
             douniRightRaise.target = 0
             kbImpactY.value = 0; kbImpactTilt.value = 0; kbSparkTimer = 0
         }
-        if isDouniSkin {
-            // Deliberate petting threshold (avoids abrupt hijacking on 1px cursor brush or fast hunting whip!) + silky Disney ease spring
-            let wantsLoaf = !isScruffDragging && scruff < 0.08 && dizzy < 0.15 && hunt < 0.22
-                && (petHeadIntensity > 0.30 || isCurrentlyPetting || petBodyIntensity > 0.35 || sleepiness > 0.48)
+        if usesDouniDesk {
+            // Deliberate petting threshold for Douni; Beagle stays at desk showing Pose 2 happy blush on pet and curls to Pose 4 on sleep
+            let wantsLoaf = isDouniSkin
+                ? (!isScruffDragging && scruff < 0.08 && dizzy < 0.15 && hunt < 0.22
+                    && (petHeadIntensity > 0.30 || isCurrentlyPetting || petBodyIntensity > 0.35 || sleepiness > 0.48))
+                : (!isScruffDragging && scruff < 0.08 && (lieIntensity.value > 0.45 || sleepiness > 0.48))
             douniLoafBlend.target = wantsLoaf ? 1.0 : 0.0
             douniLoafBlend.step(dt: dt, stiffness: 52, damping: 13.5)
             let typingNow = (douniSlapTimer > 0.04 || !activeKeys.isEmpty)
@@ -1296,7 +1299,7 @@ final class CatPhysics {
         } else if (mouseRecent || (isTabletActive && engine.isPenInProximity)) && sleepiness < 0.3 {
             if isTabletActive {
                 let nib = tabletNib.point
-                leftPaw.target = isDouniSkin ? CGPoint(x: nib.x + 6, y: nib.y - 7) : stylusPawGrip
+                leftPaw.target = usesDouniDesk ? CGPoint(x: nib.x + 6, y: nib.y - 7) : stylusPawGrip
                 if curLeftMouse || engine.penPressure > 0.02 {
                     let last = tabletTrail.last?.point
                     if last == nil || hypot(nib.x - last!.x, nib.y - last!.y) >= 1.8 {
@@ -2165,6 +2168,27 @@ final class SkinLibrary {
         let ok = (try? FileManager.default.removeItem(at: Self.directory.appendingPathComponent("\(id).kurocat"))) != nil
         reload()
         return ok
+    }
+
+    @discardableResult
+    func removeMany(ids: [String]) -> (removed: [String], failed: [String]) {
+        var removed: [String] = []
+        var failed: [String] = []
+        let fm = FileManager.default
+        for id in ids {
+            guard id.count == 16, id.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+                failed.append(id)
+                continue
+            }
+            let url = Self.directory.appendingPathComponent("\(id).kurocat")
+            if (try? fm.removeItem(at: url)) != nil {
+                removed.append(id)
+            } else {
+                failed.append(id)
+            }
+        }
+        reload()
+        return (removed, failed)
     }
 
     /// Display name with short ID suffix when multiple imported skins share the same name.

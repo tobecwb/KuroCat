@@ -124,6 +124,24 @@ struct SkinLibrary {
         reload();
         return ok;
     }
+
+    std::vector<std::string> removeMany(const std::vector<std::string>& ids, std::vector<std::string>* failedOut = nullptr) {
+        std::vector<std::string> removed;
+        if (failedOut) failedOut->clear();
+        for (const auto& id : ids) {
+            if (id.empty() || id.find('/') != std::string::npos || id.find("..") != std::string::npos) {
+                if (failedOut) failedOut->push_back(id);
+                continue;
+            }
+            if (unlink((dir() + "/" + id + ".kurocat").c_str()) == 0) {
+                removed.push_back(id);
+            } else if (failedOut) {
+                failedOut->push_back(id);
+            }
+        }
+        reload();
+        return removed;
+    }
 };
 
 struct KeyboardSkinLibrary {

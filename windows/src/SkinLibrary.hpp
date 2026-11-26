@@ -136,6 +136,24 @@ struct SkinLibrary {
         return ok;
     }
 
+    std::vector<std::string> removeMany(const std::vector<std::string>& ids, std::vector<std::string>* failedOut = nullptr) {
+        std::vector<std::string> removed;
+        if (failedOut) failedOut->clear();
+        for (const auto& id : ids) {
+            if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) {
+                if (failedOut) failedOut->push_back(id);
+                continue;
+            }
+            if (DeleteFileW((dir() + L"\\" + utf8ToWide(id) + L".kurocat").c_str()) != FALSE) {
+                removed.push_back(id);
+            } else if (failedOut) {
+                failedOut->push_back(id);
+            }
+        }
+        reload();
+        return removed;
+    }
+
     // Disambiguates duplicate skin names with a short hash suffix so users never confuse them.
     std::string displayName(const SkinSpec& s) const {
         int dup = 0;
