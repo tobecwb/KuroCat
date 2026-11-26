@@ -14,7 +14,7 @@ import path from "node:path";
 
 const SERVER_INFO = {
   name: "kurocat-mcp",
-  version: "1.5.1",
+  version: "1.5.2",
 };
 
 const PROTOCOL_VERSION = "2024-11-05";

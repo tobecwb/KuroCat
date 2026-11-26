@@ -9,6 +9,8 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <memory>
+#include <string>
 #include "CatPhysics.hpp"
 #include "TabbyCoat.hpp"
 #include "../../shared/CoatPatterns.hpp"
@@ -109,6 +111,114 @@ class CatRenderer {
 public:
     static constexpr float RadToDeg = 57.2957795f;
 
+    struct GdiplusCachePool {
+        std::unordered_map<uint32_t, std::unique_ptr<Gdiplus::SolidBrush>> brushes;
+        std::unordered_map<uint64_t, std::unique_ptr<Gdiplus::Pen>> pens;
+        std::unordered_map<uint64_t, std::unique_ptr<Gdiplus::Bitmap>> scratchBitmaps;
+        std::unordered_map<std::string, std::unique_ptr<Gdiplus::Bitmap>> bakedCoatTextures;
+    };
+
+    static inline GdiplusCachePool& cachePool() {
+        static GdiplusCachePool pool;
+        return pool;
+    }
+
+    static inline void cleanupGdiplusCaches() {
+        auto& pool = cachePool();
+        pool.brushes.clear();
+        pool.pens.clear();
+        pool.scratchBitmaps.clear();
+        pool.bakedCoatTextures.clear();
+    }
+
+    static Gdiplus::SolidBrush* cachedBrush(const Gdiplus::Color& c) {
+        auto& brushes = cachePool().brushes;
+        uint32_t key = c.GetValue();
+        auto it = brushes.find(key);
+        if (it != brushes.end()) return it->second.get();
+        if (brushes.size() >= 256) brushes.clear();
+        auto b = std::make_unique<Gdiplus::SolidBrush>(c);
+        Gdiplus::SolidBrush* ptr = b.get();
+        brushes.emplace(key, std::move(b));
+        return ptr;
+    }
+
+    static Gdiplus::Pen* cachedPen(const Gdiplus::Color& c, float width = 1.0f) {
+        auto& pens = cachePool().pens;
+        uint64_t key = (static_cast<uint64_t>(c.GetValue()) << 32) |
+                       static_cast<uint32_t>(std::lround(width * 100.0f));
+        auto it = pens.find(key);
+        if (it != pens.end()) return it->second.get();
+        if (pens.size() >= 256) pens.clear();
+        auto p = std::make_unique<Gdiplus::Pen>(c, width);
+        Gdiplus::Pen* ptr = p.get();
+        pens.emplace(key, std::move(p));
+        return ptr;
+    }
+
+    static Gdiplus::Bitmap* cachedScratchBitmap(int w, int h) {
+        auto& bmps = cachePool().scratchBitmaps;
+        uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(w)) << 32) |
+                       static_cast<uint32_t>(h);
+        auto it = bmps.find(key);
+        if (it != bmps.end()) return it->second.get();
+        if (bmps.size() >= 16) bmps.clear();
+        auto b = std::make_unique<Gdiplus::Bitmap>(w, h, PixelFormat32bppPARGB);
+        if (b->GetLastStatus() != Gdiplus::Ok) return nullptr;
+        Gdiplus::Bitmap* ptr = b.get();
+        bmps.emplace(key, std::move(b));
+        return ptr;
+    }
+
+    static uint64_t skinArtHash(const SkinSpec& skin) {
+        uint64_t h = 14695981039346656037ULL;
+        auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        mix(skin.marks.size());
+        mix(skin.regions.size());
+        for (const auto& m : skin.marks) {
+            mix((uint64_t)m.space);
+            mix((uint64_t)m.points.size());
+            mix((uint64_t)std::lround(m.width * 100.0f));
+        }
+        for (const auto& r : skin.regions) {
+            mix((uint64_t)r.space);
+            mix((uint64_t)r.flat.size());
+        }
+        return h;
+    }
+
+    template <typename DrawFn>
+    static void drawWithBakedTexture(Gdiplus::Graphics& g, const SkinSpec& skin, const char* partName,
+                                     float pixelScale, float logicalW, float logicalH, DrawFn&& bakeFn) {
+        float clampedScale = std::clamp(pixelScale, 1.0f, 3.0f);
+        int bw = std::max(1, (int)std::ceil(logicalW * clampedScale));
+        int bh = std::max(1, (int)std::ceil(logicalH * clampedScale));
+        std::string key = skin.id + "|" + partName + "|" +
+                          std::to_string((int)std::lround(clampedScale * 100.0f)) + "|" +
+                          std::to_string(skinArtHash(skin));
+        auto& cache = cachePool().bakedCoatTextures;
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            if (cache.size() >= 48) cache.clear();
+            auto bmp = std::make_unique<Gdiplus::Bitmap>(bw, bh, PixelFormat32bppPARGB);
+            if (bmp->GetLastStatus() == Gdiplus::Ok) {
+                Gdiplus::Graphics bg(bmp.get());
+                bg.Clear(Gdiplus::Color(0, 0, 0, 0));
+                bg.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+                bg.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                bg.ScaleTransform((float)bw / logicalW, (float)bh / logicalH);
+                bakeFn(bg);
+                it = cache.emplace(std::move(key), std::move(bmp)).first;
+            }
+        }
+        if (it != cache.end() && it->second) {
+            g.DrawImage(it->second.get(), Gdiplus::RectF(0.0f, 0.0f, logicalW, logicalH),
+                        0.0f, 0.0f, (Gdiplus::REAL)bw, (Gdiplus::REAL)bh, Gdiplus::UnitPixel);
+        } else {
+            bakeFn(g);
+        }
+    }
+
     static Pt headPosition(const CatPhysics& physics, const SkinSpec& skin) {
         float breath = physics.breathingOffset();
         float scruff = std::clamp(physics.scruffDrag.value, 0.0f, 1.0f);
@@ -119,7 +229,7 @@ public:
     }
 
     static CatHitZone hitTest(Pt p, const CatPhysics& physics, const SkinSpec& skin) {
-        if (skin.renderStyle == SkinRenderStyle::Douni) {
+        if (skin.renderStyle == SkinRenderStyle::Douni || skin.renderStyle == SkinRenderStyle::Beagle) {
             float loaf = std::clamp(physics.douniLoafBlend.value, 0.0f, 1.0f);
             float loafS = loaf * loaf * (3.0f - 2.0f * loaf);
             float scruff = std::clamp(physics.scruffDrag.value, 0.0f, 1.0f);
@@ -211,7 +321,8 @@ public:
         g.SetSmoothingMode(SmoothingModeHighQuality);
         g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         g.SetCompositingQuality(CompositingQualityHighQuality);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        bool isIntScale = std::fabs(settings.scale - std::round(settings.scale)) < 0.01f;
+        g.SetInterpolationMode(isIntScale ? InterpolationModeBilinear : InterpolationModeHighQualityBicubic);
         g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 
         GraphicsState flipState = g.Save();
@@ -2673,7 +2784,9 @@ private:
         constexpr float kEyeHalf = 20.0f;
         constexpr float kSS = 2.0f;
         constexpr int kEyeBmp = (int)(kEyeHalf * 2.0f * kSS); // 80x80
-        Bitmap eyeBmp(kEyeBmp, kEyeBmp, PixelFormat32bppPARGB);
+        Bitmap* eyeBmpPtr = cachedScratchBitmap(kEyeBmp, kEyeBmp);
+        if (!eyeBmpPtr) return;
+        Bitmap& eyeBmp = *eyeBmpPtr;
         {
             Graphics eg(&eyeBmp);
             eg.SetSmoothingMode(SmoothingModeHighQuality);
@@ -3493,11 +3606,12 @@ private:
         int bw = std::max(1, (int)std::ceil(w * ss));
         int bh = std::max(1, (int)std::ceil(h * ss));
 
-        Bitmap layer(bw, bh, PixelFormat32bppPARGB);
-        if (layer.GetLastStatus() != Ok) {
+        Bitmap* layerPtr = cachedScratchBitmap(bw, bh);
+        if (!layerPtr || layerPtr->GetLastStatus() != Ok) {
             drawFn(g);
             return;
         }
+        Bitmap& layer = *layerPtr;
         {
             Graphics lg(&layer);
             lg.Clear(Color(0, 0, 0, 0));
@@ -3696,85 +3810,135 @@ private:
 
     static void drawBeagleScene(Gdiplus::Graphics& g, const CatPhysics& physics, const SkinSpec& skin,
                                 const KeyboardSkinSpec& kbSkin, const CatSettings& settings) {
+        using namespace Gdiplus;
         using namespace beagle_atlas;
         EyeColorTheme eyeTheme = settings.eyeTheme;
         float scruff = std::clamp(physics.scruffDrag.value, 0.0f, 1.0f);
-        float scruffS = scruff * scruff * (3.0f - 2.0f * scruff);
+        float scruffS = smoothstep(0.0f, 1.0f, scruff);
         float lie = std::clamp(physics.lieIntensity.value, 0.0f, 1.0f);
-        float sleepVal = std::max(lie, physics.sleepiness > 0.55f ? std::min(1.0f, (physics.sleepiness - 0.55f) / 0.35f) : 0.0f);
-        float sleepS = (sleepVal * sleepVal * (3.0f - 2.0f * sleepVal)) * (1.0f - scruffS);
+        float sleepVal = std::max(lie, physics.sleepiness > 0.48f ? std::min(1.0f, (physics.sleepiness - 0.48f) / 0.35f) : 0.0f);
+        float sleepS = smoothstep(0.0f, 1.0f, sleepVal) * (1.0f - scruffS);
         float anger = std::clamp(physics.angerIntensity.value, 0.0f, 1.0f);
         float happy = std::max(physics.petHeadIntensity, physics.petBodyIntensity);
         float t = physics.time;
         float breath = std::sin(t * 2.3f) * 1.6f;
         float seatX = CatPhysics::SeatAnchor.x + physics.bodyShiftX.value;
 
-        if (scruffS < 0.50f) {
-            if (physics.isTabletActive) drawTablet(g, physics, settings.keyboardTheme, eyeTheme);
-            else drawMouse(g, physics, kbSkin);
-            drawKeyboard(g, physics, kbSkin, eyeTheme, settings.showKeyLegends, settings.keyboardMarquee, settings.flipHorizontal);
-        }
+        constexpr float deskV2Scale = 0.405f;
+        float deskTx = 14.0f + physics.bodyShiftX.value;
+        constexpr float deskTy = 22.0f;
+
+        bool useDefaultRetroGrey = (kbSkin.id == "builtin:0");
+        Color kbDeckColor     = useDefaultRetroGrey ? Color(255, 185, 187, 187) : col(kbSkin.deck);
+        Color kbBevelColor    = useDefaultRetroGrey ? Color(255, 155, 157, 156) : col(kbSkin.base);
+        Color kbKeyColor      = useDefaultRetroGrey ? Color(255, 178, 180, 179) : col(kbSkin.key);
+        Color kbAccentColor   = useDefaultRetroGrey ? Color(255, 168, 170, 169) : col(kbSkin.accent);
+        Color mouseBodyColor  = useDefaultRetroGrey ? Color(255, 190, 192, 192) : col(kbSkin.mouseBody);
+        Color mouseWheelColor = useDefaultRetroGrey ? Color(255,  92,  89,  87) : col(kbSkin.wheel);
+        Color baseGlow        = useDefaultRetroGrey ? Color(255, 255, 214,  61) : eyeGlow(eyeTheme);
+        Color glowBaseColor   = (anger > 0.05f)
+            ? blendColor(baseGlow, Color(255, 255, 87, 36), std::min(0.88f, anger * 0.88f))
+            : baseGlow;
+        Color ink = skin.palette.outline.set ? col(skin.palette.outline) : douniInkColor();
+        constexpr float catLW = 10.8f;
+        constexpr float kbLW = 12.6f;
+
+        float impY = std::clamp(physics.kbImpactY.value, -0.4f, 1.3f);
+        float impT = std::clamp(physics.kbImpactTilt.value, -0.9f, 0.9f);
+        float leftPose = std::clamp(physics.douniLeftRaise.value, -1.08f, 1.08f);
+        float rightPose = std::clamp(physics.douniRightRaise.value, -1.08f, 1.08f);
+        float mouseBlend = std::clamp(physics.douniMouseBlend.value, 0.0f, 1.0f);
+        bool isTablet = physics.isTabletActive;
+
+        Pt mouseCenter = {
+            168.0f + physics.mouseOffset.point().x * 5.2f,
+            286.0f + physics.mouseOffset.point().y * 4.5f
+        };
+        float mousePress = std::max(physics.mousePressLeft.value, std::max(physics.mousePressRight.value, physics.mousePressMiddle.value));
+        Pt nibUV = douniTabletUV(physics.tabletNib.point());
+        Pt v2Nib = v2TabletPoint(nibUV.x, nibUV.y);
+        float tabletPress = std::clamp(physics.tabletPenPress.value, 0.0f, 1.0f);
+
+        auto drawV2DeskOnly = [&](float alpha, float dropY) {
+            if (alpha <= 0.01f) return;
+            drawWithRectLayerAlpha(g, 0.0f, 0.0f, 360.0f, 320.0f, alpha, [&](Graphics& lg) {
+                GraphicsState gs = lg.Save();
+                lg.TranslateTransform(deskTx, deskTy + dropY);
+                lg.ScaleTransform(deskV2Scale, deskV2Scale);
+                if (isTablet) {
+                    drawDouniComicTablet(lg, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor,
+                                         glowBaseColor, eyePrimary(eyeTheme), ink, catLW, mouseBlend < 0.18f);
+                } else {
+                    drawDouniComicMouse(lg, mouseCenter, physics.mousePressLeft.value, physics.mousePressRight.value,
+                                        mouseBodyColor, kbBevelColor, mouseWheelColor, glowBaseColor, ink, catLW, physics.mousePressMiddle.value);
+                }
+                drawDouniV2Keyboard(lg, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor, glowBaseColor,
+                                    settings.keyboardMarquee, ink, kbLW, impY, impT);
+                lg.Restore(gs);
+            });
+        };
 
         Gdiplus::Bitmap* atlas = getBeagleAtlasBitmap();
-        if (!atlas) return;
+        if (!atlas) { if (scruffS < 0.50f) drawV2DeskOnly(1.0f, 0.0f); return; }
 
         const float S = 0.56f;
-        float gazeX = std::clamp(physics.eyeGaze.point().x, -1.0f, 1.0f) * 4.5f * S;
-        float gazeY = std::clamp(physics.eyeGaze.point().y, -1.0f, 1.0f) * 3.5f * S;
+        const float SB = 1.48f;
+        float gazeX = std::clamp(physics.eyeGaze.point().x, -1.0f, 1.0f) * 4.5f;
+        float gazeY = std::clamp(physics.eyeGaze.point().y, -1.0f, 1.0f) * 3.5f;
         bool blinking = physics.blinkProgress() > 0.55f;
-        float headTilt = physics.headTilt.value * 0.75f;
 
-        auto drawFace = [&](float hx, float hy, int mode) {
-            // 0=idle, 1=happy, 2=angry, 3=sleep, 4=lift
+        auto drawFace = [&](float hx, float hy, float sc, int mode) {
+            float gx = gazeX * sc, gy = gazeY * sc;
             if (mode == 3) {
-                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx - 42*S, hy + 24*S, S);
-                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx + 26*S, hy + 28*S, S, 0, true);
-                drawBeagleSprite(g, atlas, SP_NOSE, hx - 12*S, hy + 46*S, S);
-                float bubSc = S * (0.88f + 0.18f * std::sin(t * 2.2f));
-                drawBeagleSprite(g, atlas, SP_BUBBLE, hx + 5*S, hy + 54*S, bubSc);
+                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx - 42*sc, hy + 24*sc, sc);
+                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx + 26*sc, hy + 28*sc, sc, 0, true);
+                drawBeagleSprite(g, atlas, SP_NOSE, hx - 12*sc, hy + 46*sc, sc);
+                float bubSc = sc * (0.88f + 0.18f * std::sin(t * 2.2f));
+                drawBeagleSprite(g, atlas, SP_BUBBLE, hx + 5*sc, hy + 54*sc, bubSc);
                 return;
             }
             if (blinking && mode != 2 && mode != 4) {
-                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx - 40*S, hy + 22*S, S);
-                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx + 26*S, hy + 26*S, S, 0, true);
-                drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*S, hy + 44*S, S);
+                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx - 40*sc, hy + 22*sc, sc);
+                drawBeagleSprite(g, atlas, SP_EYE_CLOSED, hx + 26*sc, hy + 26*sc, sc, 0, true);
+                drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*sc, hy + 44*sc, sc);
                 return;
             }
             if (mode == 2) {
-                drawBeagleSprite(g, atlas, SP_ANGRY_FRAME_R, hx - 38*S, hy + 18*S, S);
-                drawBeagleSprite(g, atlas, SP_ANGRY_FRAME_L, hx + 28*S, hy + 24*S, S);
-                drawBeagleSprite(g, atlas, SP_PUPIL_L, hx - 38*S + gazeX*0.6f, hy + 22*S + gazeY*0.6f, S);
-                drawBeagleSprite(g, atlas, SP_PUPIL_R, hx + 28*S + gazeX*0.6f, hy + 28*S + gazeY*0.6f, S);
-                drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*S, hy + 46*S, S);
+                drawBeagleSprite(g, atlas, SP_ANGRY_FRAME_R, hx - 38*sc, hy + 18*sc, sc);
+                drawBeagleSprite(g, atlas, SP_ANGRY_FRAME_L, hx + 28*sc, hy + 24*sc, sc);
+                drawBeagleSprite(g, atlas, SP_PUPIL_L, hx - 38*sc + gx*0.6f, hy + 22*sc + gy*0.6f, sc);
+                drawBeagleSprite(g, atlas, SP_PUPIL_R, hx + 28*sc + gx*0.6f, hy + 28*sc + gy*0.6f, sc);
+                drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*sc, hy + 46*sc, sc);
                 float pulse = 1.0f + std::sin(t * 14.0f) * 0.10f;
-                drawBeagleSprite(g, atlas, SP_ANGER_MARK, hx + 36*S, hy - 44*S, S * pulse);
-                drawBeagleSprite(g, atlas, SP_SWEAT, hx - 44*S, hy - 36*S, S);
+                drawBeagleSprite(g, atlas, SP_ANGER_MARK, hx + 36*sc, hy - 44*sc, sc * pulse);
+                drawBeagleSprite(g, atlas, SP_SWEAT, hx - 44*sc, hy - 36*sc, sc);
                 return;
             }
-            drawBeagleSprite(g, atlas, SP_EYE_FRAME_L, hx - 38*S, hy + 16*S, S);
-            drawBeagleSprite(g, atlas, SP_EYE_FRAME_R, hx + 28*S, hy + 22*S, S);
-            drawBeagleSprite(g, atlas, SP_PUPIL_L, hx - 38*S + gazeX, hy + 18*S + gazeY, S);
-            drawBeagleSprite(g, atlas, SP_PUPIL_R, hx + 28*S + gazeX, hy + 24*S + gazeY, S);
+            drawBeagleSprite(g, atlas, SP_EYE_FRAME_L, hx - 38*sc, hy + 16*sc, sc);
+            drawBeagleSprite(g, atlas, SP_EYE_FRAME_R, hx + 28*sc, hy + 22*sc, sc);
+            drawBeagleSprite(g, atlas, SP_PUPIL_L, hx - 38*sc + gx, hy + 18*sc + gy, sc);
+            drawBeagleSprite(g, atlas, SP_PUPIL_R, hx + 28*sc + gx, hy + 24*sc + gy, sc);
             if (mode == 1) {
-                drawBeagleSprite(g, atlas, SP_EYE_HI, hx - 36*S + gazeX*0.5f, hy + 12*S + gazeY*0.5f, S);
-                drawBeagleSprite(g, atlas, SP_EYE_HI, hx + 30*S + gazeX*0.5f, hy + 18*S + gazeY*0.5f, S);
-                drawBeagleSprite(g, atlas, SP_BLUSH, hx - 60*S, hy + 44*S, S);
-                drawBeagleSprite(g, atlas, SP_BLUSH, hx + 42*S, hy + 48*S, S);
+                drawBeagleSprite(g, atlas, SP_EYE_HI, hx - 36*sc + gx*0.5f, hy + 12*sc + gy*0.5f, sc);
+                drawBeagleSprite(g, atlas, SP_EYE_HI, hx + 30*sc + gx*0.5f, hy + 18*sc + gy*0.5f, sc);
+                drawBeagleSprite(g, atlas, SP_BLUSH, hx - 60*sc, hy + 44*sc, sc);
+                drawBeagleSprite(g, atlas, SP_BLUSH, hx + 42*sc, hy + 48*sc, sc);
             } else if (mode == 4) {
-                drawBeagleSprite(g, atlas, SP_LIFT_EYE_HI, hx - 36*S + gazeX*0.4f, hy + 16*S + gazeY*0.4f, S);
-                drawBeagleSprite(g, atlas, SP_LIFT_EYE_HI, hx + 30*S + gazeX*0.4f, hy + 22*S + gazeY*0.4f, S);
-                drawBeagleSprite(g, atlas, SP_SWEAT, hx - 44*S, hy - 36*S, S);
+                drawBeagleSprite(g, atlas, SP_LIFT_EYE_HI, hx - 36*sc + gx*0.4f, hy + 16*sc + gy*0.4f, sc);
+                drawBeagleSprite(g, atlas, SP_LIFT_EYE_HI, hx + 30*sc + gx*0.4f, hy + 22*sc + gy*0.4f, sc);
+                drawBeagleSprite(g, atlas, SP_SWEAT, hx - 44*sc, hy - 36*sc, sc);
             }
-            drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*S, hy + 44*S, S);
+            drawBeagleSprite(g, atlas, SP_NOSE, hx - 10*sc, hy + 44*sc, sc);
         };
 
         if (scruffS > 0.35f) {
+            drawV2DeskOnly(1.0f - smoothstep(0.0f, 0.48f, scruffS), scruffS * 28.0f);
             float swing = std::clamp(physics.scruffSwing.value, -0.5f, 0.5f);
             float hx = seatX - 10.0f + swing * 18.0f;
             float hy = 132.0f + std::sin(t * 3.0f) * 3.5f;
             float wag = std::sin(t * 11.0f) * 0.24f;
             float legSwing = std::sin(t * 7.5f) * 0.18f + swing * 0.45f;
-            Gdiplus::GraphicsState st = g.Save();
+            GraphicsState st = g.Save();
             g.TranslateTransform(hx, hy);
             g.RotateTransform(swing * 0.25f * 57.29578f);
             drawBeagleSprite(g, atlas, SP_LIFT_TAIL, 124*S, -34*S, S, wag);
@@ -3784,45 +3948,119 @@ private:
             drawBeagleSprite(g, atlas, SP_LIFT_FRONT_PAW, 18*S, 100*S, S, -legSwing * 0.9f);
             drawBeagleSprite(g, atlas, SP_EAR_L, -74*S, 12*S, S, -swing * 0.35f + std::sin(t * 5.0f) * 0.05f);
             drawBeagleSprite(g, atlas, SP_HEAD, 0, 0, S);
-            drawFace(0, 0, 4);
+            drawFace(0, 0, S, 4);
             drawBeagleSprite(g, atlas, SP_EAR_R, 86*S, 22*S, S, -swing * 0.35f - std::sin(t * 5.0f) * 0.05f);
             g.Restore(st);
             if (physics.musicIntensity > 0.01f) drawMusicHeadphones(g, { hx, hy }, physics, eyeTheme, skin);
             return;
         }
         if (sleepS > 0.45f) {
+            drawV2DeskOnly(1.0f - smoothstep(0.45f, 0.80f, sleepS), smoothstep(0.45f, 0.80f, sleepS) * 34.0f);
+            float slAlpha = smoothstep(0.45f, 0.65f, sleepS);
             float hx = seatX - 24.0f, hy = 178.0f + breath * 0.7f;
-            drawBeagleSprite(g, atlas, SP_SLEEP_TAIL, hx + 158*S, hy + 44*S, S, std::sin(t * 1.8f) * 0.08f);
-            drawBeagleSprite(g, atlas, SP_SLEEP_HIND_PAW, hx + 104*S, hy + 68*S, S);
-            drawBeagleSprite(g, atlas, SP_SLEEP_BODY, hx + 54*S, hy + 22*S + breath * 0.35f, S);
-            drawBeagleSprite(g, atlas, SP_SLEEP_EAR_L, hx - 68*S, hy + 12*S, S);
-            drawBeagleSprite(g, atlas, SP_SLEEP_FRONT_PAW, hx - 74*S, hy + 72*S, S);
-            drawBeagleSprite(g, atlas, SP_HEAD, hx, hy, S);
-            drawFace(hx, hy, 3);
-            drawBeagleSprite(g, atlas, SP_SLEEP_EAR_R, hx + 70*S, hy + 18*S, S);
-            drawBeagleSprite(g, atlas, SP_SLEEP_FRONT_PAW, hx + 18*S, hy + 74*S, S);
+            drawWithRectLayerAlpha(g, 0.0f, 0.0f, 360.0f, 320.0f, slAlpha, [&](Graphics& lg) {
+                drawBeagleSprite(lg, atlas, SP_SLEEP_TAIL, hx + 158*S, hy + 44*S, S, std::sin(t * 1.8f) * 0.08f);
+                drawBeagleSprite(lg, atlas, SP_SLEEP_HIND_PAW, hx + 104*S, hy + 68*S, S);
+                drawBeagleSprite(lg, atlas, SP_SLEEP_BODY, hx + 54*S, hy + 22*S + breath * 0.35f, S);
+                drawBeagleSprite(lg, atlas, SP_SLEEP_EAR_L, hx - 68*S, hy + 12*S, S);
+                drawBeagleSprite(lg, atlas, SP_SLEEP_FRONT_PAW, hx - 74*S, hy + 72*S, S);
+                drawBeagleSprite(lg, atlas, SP_HEAD, hx, hy, S);
+                drawBeagleSprite(lg, atlas, SP_EYE_CLOSED, hx - 42*S, hy + 24*S, S);
+                drawBeagleSprite(lg, atlas, SP_EYE_CLOSED, hx + 26*S, hy + 28*S, S, 0, true);
+                drawBeagleSprite(lg, atlas, SP_NOSE, hx - 12*S, hy + 46*S, S);
+                drawBeagleSprite(lg, atlas, SP_BUBBLE, hx + 5*S, hy + 54*S, S * (0.88f + 0.18f * std::sin(t * 2.2f)));
+                drawBeagleSprite(lg, atlas, SP_SLEEP_EAR_R, hx + 70*S, hy + 18*S, S);
+                drawBeagleSprite(lg, atlas, SP_SLEEP_FRONT_PAW, hx + 18*S, hy + 74*S, S);
+            });
             if (physics.musicIntensity > 0.01f) drawMusicHeadphones(g, { hx, hy }, physics, eyeTheme, skin);
             return;
         }
-        float lTap = physics.leftPawTyping ? 1.0f : std::clamp(-physics.douniLeftRaise.value, 0.0f, 1.0f);
-        float rTap = physics.rightPawTyping ? 1.0f : std::clamp(-physics.douniRightRaise.value, 0.0f, 1.0f);
-        float hx = seatX + physics.headYaw.value * 4.5f;
-        float hy = 152.0f + breath * 0.8f + (lTap + rTap) * 2.2f;
-        float earBob = std::sin(t * 2.3f - 0.5f) * 0.03f + (lTap - rTap) * 0.08f;
+
+        auto drawBeagleV2Paw = [&](Pt sh, Pt tip) {
+            float dx = tip.x - sh.x, dy = tip.y - sh.y;
+            float dist = std::max(60.0f, std::hypot(dx, dy));
+            float lenScale = std::clamp(dist / (104.0f * SB), 0.76f, 1.62f);
+            float angle = std::atan2(dy, dx);
+            GraphicsState ps = g.Save();
+            g.TranslateTransform(tip.x, tip.y);
+            g.RotateTransform((angle - 3.14159265f) * 57.29578f);
+            g.ScaleTransform(lenScale, 1.0f);
+            drawBeagleSprite(g, atlas, SP_PAW, 52.0f * SB, 0.0f, SB);
+            g.Restore(ps);
+        };
+
+        float angerShakeX = (anger > 0.08f) ? std::sin(t * 42.0f) * 3.2f * anger : 0.0f;
+        float headBobY = std::fabs(leftPose - rightPose) * 2.5f + breath * 1.4f + impY * 5.2f + anger * 5.0f;
+        float headTiltRad = -rightPose * 0.010f + leftPose * 0.012f + physics.headTilt.value * 0.10f + impT * 0.014f;
+        float earBob = std::sin(t * 2.3f - 0.5f) * 0.03f + (leftPose - rightPose) * 0.04f;
         int faceMode = anger > 0.32f ? 2 : (happy > 0.22f ? 1 : 0);
 
-        drawBeagleSprite(g, atlas, SP_BODY, seatX + 4*S, hy + 88*S, S);
-        drawBeagleSprite(g, atlas, SP_PAW, hx - 92*S, hy + (72 + lTap*18)*S, S, -lTap * 0.16f);
-        Gdiplus::GraphicsState hs = g.Save();
-        g.TranslateTransform(hx, hy);
-        g.RotateTransform(headTilt * 57.29578f);
-        drawBeagleSprite(g, atlas, SP_EAR_L, -74*S, 12*S, S, earBob);
-        drawBeagleSprite(g, atlas, SP_HEAD, 0, 0, S);
-        drawFace(0, 0, faceMode);
-        drawBeagleSprite(g, atlas, SP_PAW, -6*S, (96 + rTap*18)*S, S, rTap * 0.14f);
-        drawBeagleSprite(g, atlas, SP_EAR_R, 86*S, 22*S, S, -earBob);
-        g.Restore(hs);
-        if (physics.musicIntensity > 0.01f) drawMusicHeadphones(g, { hx, hy }, physics, eyeTheme, skin);
+        GraphicsState v2st = g.Save();
+        g.TranslateTransform(deskTx, deskTy);
+        g.ScaleTransform(deskV2Scale, deskV2Scale);
+
+        if (isTablet) {
+            drawDouniComicTablet(g, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor,
+                                 glowBaseColor, eyePrimary(eyeTheme), ink, catLW, mouseBlend < 0.18f);
+        } else {
+            drawDouniComicMouse(g, mouseCenter, physics.mousePressLeft.value, physics.mousePressRight.value,
+                                mouseBodyColor, kbBevelColor, mouseWheelColor, glowBaseColor, ink, catLW, physics.mousePressMiddle.value);
+        }
+
+        {
+            GraphicsState hs = g.Save();
+            g.TranslateTransform(582.0f + angerShakeX, 248.0f + headBobY);
+            g.RotateTransform(headTiltRad * 57.29578f);
+            drawBeagleSprite(g, atlas, SP_BODY, 14*SB, 92*SB, SB);
+            drawBeagleSprite(g, atlas, SP_EAR_L, -74*SB, 12*SB, SB, earBob);
+            drawBeagleSprite(g, atlas, SP_HEAD, 0, 0, SB);
+            drawFace(0, 0, SB, faceMode);
+            drawBeagleSprite(g, atlas, SP_EAR_R, 86*SB, 22*SB, SB, -earBob);
+            g.Restore(hs);
+        }
+
+        drawDouniV2Keyboard(g, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor, glowBaseColor,
+                            settings.keyboardMarquee, ink, kbLW, impY, impT);
+
+        Pt lTarget = { physics.douniLeftKeyTarget.point().x + impT * 10.0f, physics.douniLeftKeyTarget.point().y + impY * 8.5f };
+        Pt leftToolTarget = isTablet
+            ? Pt{ v2Nib.x + 14.0f, v2Nib.y - 12.0f + tabletPress * 5.0f }
+            : Pt{ mouseCenter.x + 10.0f, mouseCenter.y - 2.0f + mousePress * 8.0f };
+        Pt lIdleSh = { 468.0f, 344.0f }, lIdleTip = { 242.0f, 346.0f };
+        Pt lSlamSh = { 468.0f, 350.0f }, lSlamTip = lTarget;
+        Pt lHighSh = { 468.0f, 302.0f }, lHighTip = { 258.0f, 248.0f };
+        Pt lMouseSh = { 468.0f, 326.0f }, lMouseTip = leftToolTarget;
+        float lTypT = std::clamp(std::fabs(leftPose), 0.0f, 1.05f);
+        Pt lTypSh = leftPose >= 0.0f ? lerpPt(lIdleSh, lHighSh, lTypT) : lerpPt(lIdleSh, lSlamSh, lTypT);
+        Pt lTypTip = leftPose >= 0.0f ? lerpPt(lIdleTip, lHighTip, lTypT) : lerpPt(lIdleTip, lSlamTip, lTypT);
+        Pt lSh = mouseBlend > 0.01f ? lerpPt(lTypSh, lMouseSh, mouseBlend) : lTypSh;
+        Pt lTip = mouseBlend > 0.01f ? lerpPt(lTypTip, lMouseTip, mouseBlend) : lTypTip;
+        drawBeagleV2Paw(lSh, lTip);
+
+        if (isTablet && mouseBlend > 0.18f) {
+            float penAlpha = smoothstep(0.18f, 0.42f, mouseBlend);
+            drawWithRectLayerAlpha(g, -40.0f, -40.0f, 440.0f, 440.0f, penAlpha, [&](Graphics& pg) {
+                GraphicsState ps = pg.Save();
+                pg.TranslateTransform(v2Nib.x, v2Nib.y + tabletPress * 4.0f);
+                pg.RotateTransform((-2.14f + physics.tabletPenTilt.value) * 57.29578f);
+                drawDouniComicStylus(pg, 124.0f, glowBaseColor, eyePrimary(eyeTheme), ink, catLW, tabletPress);
+                pg.Restore(ps);
+            });
+        }
+
+        Pt rTarget = { physics.douniRightKeyTarget.point().x + impT * 10.0f, physics.douniRightKeyTarget.point().y + impY * 8.5f };
+        Pt rIdleSh = { 616.0f, 374.0f }, rIdleTip = { 410.0f, 368.0f };
+        Pt rSlamSh = { 604.0f, 372.0f }, rSlamTip = rTarget;
+        Pt rHighSh = { 622.0f, 356.0f }, rHighTip = { 422.0f, 294.0f };
+        float rTypT = std::clamp(std::fabs(rightPose), 0.0f, 1.05f);
+        Pt rSh = rightPose >= 0.0f ? lerpPt(rIdleSh, rHighSh, rTypT) : lerpPt(rIdleSh, rSlamSh, rTypT);
+        Pt rTip = rightPose >= 0.0f ? lerpPt(rIdleTip, rHighTip, rTypT) : lerpPt(rIdleTip, rSlamTip, rTypT);
+        drawBeagleV2Paw(rSh, rTip);
+
+        g.Restore(v2st);
+        if (physics.musicIntensity > 0.01f) {
+            drawMusicHeadphones(g, { deskTx + (582.0f + angerShakeX) * deskV2Scale, deskTy + (248.0f + headBobY) * deskV2Scale }, physics, eyeTheme, skin);
+        }
     }
 
     static void drawDouniScene(

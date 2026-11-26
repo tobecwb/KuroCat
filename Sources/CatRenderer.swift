@@ -192,7 +192,7 @@ enum CatRenderer {
         }
 
         let skin = CatSettings.shared.activeSkin
-        if skin.renderStyle == .douni {
+        if skin.renderStyle == .douni || skin.renderStyle == .beagle {
             let loaf = max(0, min(1, physics.douniLoafBlend.value))
             let loafS = loaf * loaf * (3.0 - 2.0 * loaf)
             let scruff = max(0, min(1, physics.scruffDrag.value))
@@ -251,7 +251,7 @@ enum CatRenderer {
     }
 
     static func canSplitLayers(physics: CatPhysics, skin: SkinSpec) -> Bool {
-        skin.renderStyle != .douni && physics.scruffDrag.value <= 0.005
+        skin.renderStyle != .douni && skin.renderStyle != .beagle && physics.scruffDrag.value <= 0.005
     }
 
     /// Backdrop only (optional green screen + mouse/tablet + keyboard) for split-layer marquee caching.
@@ -1263,7 +1263,7 @@ enum CatRenderer {
         }
 
         let glowRGBA = RGBAColor(glowBaseColor)
-        if marquee && physics.keyGlow.isEmpty {
+        if marquee {
             let asleep = physics.sleepiness >= 0.95
             let steps = marqueeSteps(asleep: asleep)
             let bucket = marqueeBucket(phase: physics.marqueePhase, asleep: asleep)
@@ -1271,16 +1271,39 @@ enum CatRenderer {
             if marqueeCycleCache?.key != cKey {
                 marqueeCycleCache = (cKey, Dictionary(minimumCapacity: steps))
             }
+            let baseBmp: KeyboardBitmap?
             if let cached = marqueeCycleCache?.bitmaps[bucket] {
-                cached.draw(in: ctx)
-                return
+                baseBmp = cached
+            } else {
+                let qPhase = CGFloat(bucket) / CGFloat(steps)
+                let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
+                    renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase, glowBaseColor: glowBaseColor)
+                })
+                if let bmp { marqueeCycleCache?.bitmaps[bucket] = bmp }
+                baseBmp = bmp
             }
-            let qPhase = CGFloat(bucket) / CGFloat(steps)
-            if let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
-                renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase, glowBaseColor: glowBaseColor)
-            }) {
-                marqueeCycleCache?.bitmaps[bucket] = bmp
-                bmp.draw(in: ctx)
+            if let baseBmp {
+                baseBmp.draw(in: ctx)
+                if !physics.keyGlow.isEmpty {
+                    let phase = physics.marqueePhase.truncatingRemainder(dividingBy: 1)
+                    let backlight = KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
+                                                    start: artwork.deckStart, end: artwork.deckEnd)
+                    for (k, glow) in physics.keyGlow where glow > 0.01 {
+                        guard let keyArt = artwork.keyByKey[k] else { continue }
+                        ctx.saveGState()
+                        ctx.addPath(keyArt.erasePath)
+                        ctx.clip()
+                        artwork.chassis?.draw(in: ctx)
+                        drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath)
+                        ctx.restoreGState()
+                        drawKeyboardKey(keyArt, in: ctx, glow: glow, glowRGBA: glowRGBA, backlight: backlight, drawLegend: true)
+                    }
+                    for (key, glow) in physics.keyGlow where glow > 0.05 {
+                        let center = KeyboardLayout.canvasPoint(for: key)
+                        drawRadialGlow(in: ctx, center: center, radius: 17.0 + glow * 6.0,
+                                       color: glowBaseColor.withAlphaComponent(0.36 * glow))
+                    }
+                }
                 return
             }
         }
@@ -1588,14 +1611,24 @@ enum CatRenderer {
         }
     }
 
+    private static var marqueeGradientCache: [Int: CGGradient] = [:]
+
     private static func drawMarquee(_ light: KeyboardMarquee, in ctx: CGContext, clippedTo deck: CGPath) {
         ctx.saveGState()
         ctx.addPath(deck)
         ctx.clip()
-        let colors = marqueeStops.map { stop in
-            light.color.withAlphaComponent(light.wave(at: stop) * 200.0 / 255.0).cgColor
+        let bucket = ((Int((light.phase * 60.0).rounded()) % 60) + 60) % 60
+        let band: CGGradient?
+        if let cached = marqueeGradientCache[bucket] {
+            band = cached
+        } else {
+            let colors = marqueeStops.map { stop in
+                light.color.withAlphaComponent(light.wave(at: stop) * 200.0 / 255.0).cgColor
+            }
+            band = CGGradient(colorsSpace: rgbColorSpace, colors: colors as CFArray, locations: marqueeStops)
+            if let band { marqueeGradientCache[bucket] = band }
         }
-        if let band = CGGradient(colorsSpace: rgbColorSpace, colors: colors as CFArray, locations: marqueeStops) {
+        if let band {
             ctx.drawLinearGradient(band, start: light.start, end: light.end,
                                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
         }
@@ -1738,6 +1771,85 @@ enum CatRenderer {
     private static var pointsGradientCache: [ColorPairKey: PointsGradients] = [:]
     private static var headGeometryCache: [HeadGeometryKey: HeadGeometryEntry] = [:]
     private static var bodyGeometryCache: [BodyGeometryKey: BodyGeometryEntry] = [:]
+
+    private struct HeadBakedKey: Hashable {
+        let geoKey: HeadGeometryKey
+        let rasterScale: CGFloat
+        let coverageActive: Bool
+    }
+    private struct BakedTexture {
+        let image: CGImage
+        let bounds: CGRect
+    }
+    private static var headMarksBakedCache: [HeadBakedKey: BakedTexture] = [:]
+
+    static func purgeVolatileCaches() {
+        marqueeCycleCache = nil
+        marqueeGradientCache.removeAll(keepingCapacity: false)
+        headMarksBakedCache.removeAll(keepingCapacity: false)
+    }
+
+    private static func cachedHeadBakedMarks(
+        skin: SkinSpec,
+        headGeo: HeadGeometryEntry,
+        headTx: HeadTransform,
+        geoKey: HeadGeometryKey,
+        rasterScale: CGFloat,
+        coverageActive: Bool,
+        srgb: Bool
+    ) -> BakedTexture? {
+        let qScale = max(1.0, min(3.0, (rasterScale * 2.0).rounded() / 2.0))
+        let key = HeadBakedKey(geoKey: geoKey, rasterScale: qScale, coverageActive: coverageActive)
+        if let hit = headMarksBakedCache[key] { return hit }
+        if headMarksBakedCache.count >= 8 {
+            headMarksBakedCache.removeAll(keepingCapacity: true)
+        }
+        let bounds = CGRect(x: -100, y: -100, width: 200, height: 200)
+        let pxW = max(1, Int((bounds.width * qScale).rounded()))
+        let pxH = max(1, Int((bounds.height * qScale).rounded()))
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
+        guard let bctx = CGContext(
+            data: nil, width: pxW, height: pxH, bitsPerComponent: 8, bytesPerRow: pxW * 4, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        bctx.setAllowsAntialiasing(true)
+        bctx.setShouldAntialias(true)
+        bctx.translateBy(x: 0, y: CGFloat(pxH))
+        bctx.scaleBy(x: qScale, y: -qScale)
+        bctx.translateBy(x: -bounds.minX, y: -bounds.minY)
+
+        for region in skin.regions where region.space == .head || region.space == .skull {
+            drawRegion(in: bctx, region, srgb: srgb) { p in
+                headTx.mapRelative(p, skull: region.space == .skull)
+            }
+        }
+        for (idx, mark) in skin.marks.enumerated() where mark.space == .head || mark.space == .skull {
+            if mark.clipToBib && !coverageActive { continue }
+            let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
+            if needsBrushRender {
+                drawMark(in: bctx, mark, srgb: srgb) { p in
+                    headTx.mapRelative(p, skull: mark.space == .skull)
+                }
+            } else if let mPath = headGeo.markPaths[idx], let mColor = headGeo.markColors[idx] {
+                if !mark.stroke {
+                    bctx.setFillColor(mColor)
+                    bctx.addPath(mPath)
+                    bctx.fillPath()
+                } else {
+                    bctx.setStrokeColor(mColor)
+                    bctx.setLineWidth(mark.width)
+                    bctx.setLineCap(.round)
+                    bctx.setLineJoin(.round)
+                    bctx.addPath(mPath)
+                    bctx.strokePath()
+                }
+            }
+        }
+        guard let img = bctx.makeImage() else { return nil }
+        let entry = BakedTexture(image: img, bounds: bounds)
+        headMarksBakedCache[key] = entry
+        return entry
+    }
 
     private static func cachedJawSide(head: Bool, cheekFullness: CGFloat) -> [CGPoint] {
         if let hit = jawSideCache[cheekFullness] {
@@ -3001,6 +3113,38 @@ enum CatRenderer {
                 let isDome = skin.headSurface == .dome
                 let headTx = HeadTransform(yaw: yaw, pitch: pitch, tilt: hTilt, headScale: skin.shape.headScale, isDome: isDome)
                 let bodyTx = BodyTransform(bodyWidth: skin.shape.bodyWidth, bodySquash: physics.bodySquash.value, lieIntensity: lie, bodyTilt: bTilt)
+
+                var usedBakedHeadMarks = false
+                if skin.marks.count >= 16 {
+                    let qYaw = (yaw * 40).rounded() / 40
+                    let qPitch = (pitch * 40).rounded() / 40
+                    let qTilt = (hTilt * 40).rounded() / 40
+                    let qKey = HeadGeometryKey(
+                        skinId: skin.id, srgb: srgb, headScale: skin.shape.headScale,
+                        cheekFullness: skin.shape.cheekFullness, isDome: isDome,
+                        regionCount: skin.regions.count, markCount: skin.marks.count,
+                        yaw: qYaw, pitch: qPitch, tilt: qTilt,
+                        coverage: (coverage * 20).rounded() / 20
+                    )
+                    if let baked = cachedHeadBakedMarks(
+                        skin: skin, headGeo: headGeo, headTx: headTx,
+                        geoKey: qKey, rasterScale: currentRasterScale(in: ctx).width,
+                        coverageActive: coverage > 0, srgb: srgb
+                    ) {
+                        ctx.saveGState()
+                        ctx.translateBy(x: headCenter.x, y: headCenter.y)
+                        if let jawHeadPath = headGeo.jawHeadPath {
+                            ctx.addPath(jawHeadPath)
+                            ctx.clip()
+                        }
+                        ctx.translateBy(x: 0, y: baked.bounds.maxY + baked.bounds.minY)
+                        ctx.scaleBy(x: 1, y: -1)
+                        ctx.draw(baked.image, in: baked.bounds)
+                        ctx.restoreGState()
+                        usedBakedHeadMarks = true
+                    }
+                }
+
                 for (idx, mark) in skin.marks.enumerated() {
                     if mark.clipToBib && coverage == 0 { continue }
                     let needsBrushRender = mark.stroke && (mark.brush != .round || mark.points.count <= 1)
@@ -3023,6 +3167,7 @@ enum CatRenderer {
                             ctx.restoreGState()
                         }
                     case .skull, .head:
+                        if usedBakedHeadMarks { break }
                         if let mPath = headGeo.markPaths[idx],
                            let mColor = headGeo.markColors[idx] {
                             ctx.saveGState()
@@ -4746,80 +4891,143 @@ enum CatRenderer {
         marquee: Bool
     ) {
         let scruff = max(0, min(1, physics.scruffDrag.value))
-        let scruffS = scruff * scruff * (3.0 - 2.0 * scruff)
+        let scruffS = smoothstep(0.0, 1.0, scruff)
         let lie = max(0, min(1, physics.lieIntensity.value))
-        let sleepVal = max(lie, physics.sleepiness > 0.55 ? min(1.0, (physics.sleepiness - 0.55) / 0.35) : 0.0)
-        let sleepS = (sleepVal * sleepVal * (3.0 - 2.0 * sleepVal)) * (1.0 - scruffS)
+        let sleepVal = max(lie, physics.sleepiness > 0.48 ? min(1.0, (physics.sleepiness - 0.48) / 0.35) : 0.0)
+        let sleepS = smoothstep(0.0, 1.0, sleepVal) * (1.0 - scruffS)
         let anger = max(0, min(1, physics.angerIntensity.value))
         let happy = max(physics.petHeadIntensity, physics.petBodyIntensity)
         let t = physics.time
         let breath = sin(t * 2.3) * 1.6
         let seatX = CatPhysics.seatAnchor.x + physics.bodyShiftX.value
 
-        let deskAlpha = 1.0 - min(1.0, scruffS / 0.55)
-        if deskAlpha > 0.02 {
+        let deskV2Scale: CGFloat = 0.405
+        let deskTx: CGFloat = 14.0 + physics.bodyShiftX.value
+        let deskTy: CGFloat = 22.0
+
+        // Mirror Douni V2 desk styling (authentic retro grey by default, or synced with chosen .kurokb skin)
+        let useDefaultRetroGrey = (kbSkin.id == "builtin:0")
+        let kbDeckColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.725, green: 0.733, blue: 0.733, alpha: 1.0) : kbSkin.deck.ns
+        let kbBevelColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.608, green: 0.616, blue: 0.612, alpha: 1.0) : kbSkin.base.ns
+        let kbKeyColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.698, green: 0.706, blue: 0.702, alpha: 1.0) : kbSkin.key.ns
+        let kbAccentColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.658, green: 0.666, blue: 0.662, alpha: 1.0) : kbSkin.accent.ns
+        let mouseBodyColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.745, green: 0.753, blue: 0.753, alpha: 1.0) : kbSkin.mouseBody.ns
+        let mouseWheelColor = useDefaultRetroGrey ? NSColor(calibratedRed: 0.36, green: 0.35, blue: 0.34, alpha: 1.0) : kbSkin.wheel.ns
+        let baseGlow = useDefaultRetroGrey ? NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.24, alpha: 1.0) : eyeTheme.glowColor
+        let glowBaseColor = anger > 0.05
+            ? blendColor(baseGlow, NSColor(calibratedRed: 1.0, green: 0.34, blue: 0.14, alpha: 1.0), t: min(0.88, anger * 0.88))
+            : baseGlow
+        let ink = skin.palette.outline?.ns ?? douniInkColor
+        let catLW: CGFloat = 10.8
+        let kbLW: CGFloat = 12.6
+
+        let impY = max(-0.4, min(1.3, physics.kbImpactY.value))
+        let impT = max(-0.9, min(0.9, physics.kbImpactTilt.value))
+        let leftPose = max(-1.08, min(1.08, physics.douniLeftRaise.value))
+        let rightPose = max(-1.08, min(1.08, physics.douniRightRaise.value))
+        let mouseBlend = max(0, min(1, physics.douniMouseBlend.value))
+        let isTablet = physics.isTabletActive
+
+        let mouseCenter = CGPoint(
+            x: 168 + physics.mouseOffset.point.x * 5.2,
+            y: 286 + physics.mouseOffset.point.y * 4.5
+        )
+        let mousePress = max(physics.mousePressLeft.value, max(physics.mousePressRight.value, physics.mousePressMiddle.value))
+        let nibUV = douniTabletUV(from: physics.tabletNib.point)
+        let v2Nib = v2TabletPoint(u: nibUV.u, v: nibUV.v)
+        let tabletPress = max(0, min(1, physics.tabletPenPress.value))
+
+        let S: CGFloat = 0.56
+        let SB: CGFloat = 1.48 // Beagle sprite scale inside 832x720 V2Space (matches Xiao Douni V2 head/paw proportions)
+        let gaze = physics.eyeGaze.point
+        let gazeX = max(-1, min(1, gaze.x)) * 4.5
+        let gazeY = max(-1, min(1, gaze.y)) * 3.5
+        let blinking = physics.blinkProgress > 0.55
+
+        let drawV2DeskOnly: (CGFloat, CGFloat) -> Void = { alpha, dropY in
+            guard alpha > 0.01 else { return }
             ctx.saveGState()
-            ctx.setAlpha(deskAlpha)
-            if physics.isTabletActive {
-                drawTablet(in: ctx, physics: physics, theme: kbTheme, eyeTheme: eyeTheme)
+            ctx.setAlpha(alpha)
+            ctx.translateBy(x: deskTx, y: deskTy + dropY)
+            ctx.scaleBy(x: deskV2Scale, y: deskV2Scale)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            if isTablet {
+                drawDouniComicTablet(
+                    in: ctx, physics: physics,
+                    deckColor: kbDeckColor, bevelColor: kbBevelColor,
+                    padColor: kbKeyColor, accentColor: kbAccentColor,
+                    glowColor: glowBaseColor, eyeColor: eyeTheme.primaryColor,
+                    ink: ink, lw: catLW, showParkedStylus: mouseBlend < 0.18
+                )
             } else {
-                drawMouse(in: ctx, physics: physics, kbSkin: kbSkin)
+                drawDouniComicMouse(
+                    in: ctx, center: mouseCenter,
+                    pressLeft: physics.mousePressLeft.value,
+                    pressRight: physics.mousePressRight.value,
+                    pressMiddle: physics.mousePressMiddle.value,
+                    bodyColor: mouseBodyColor, bevelColor: kbBevelColor,
+                    wheelColor: mouseWheelColor, glowColor: glowBaseColor,
+                    ink: ink, lw: catLW
+                )
             }
-            drawKeyboard(in: ctx, physics: physics, kbSkin: kbSkin, eyeTheme: eyeTheme, showLegends: showLegends, flipped: flipped, marquee: marquee)
+            drawDouniV2Keyboard(
+                in: ctx, physics: physics,
+                deckColor: kbDeckColor, bevelColor: kbBevelColor,
+                keyColor: kbKeyColor, accentColor: kbAccentColor,
+                glowColor: glowBaseColor, marquee: marquee,
+                ink: ink, lw: kbLW, impactY: impY, impactTilt: impT
+            )
             ctx.restoreGState()
         }
 
-        let S: CGFloat = 0.56
-        let gaze = physics.eyeGaze.point
-        let gazeX = max(-1, min(1, gaze.x)) * 4.5 * S
-        let gazeY = max(-1, min(1, gaze.y)) * 3.5 * S
-        let blinking = physics.blinkProgress > 0.55
-        let headTilt = physics.headTilt.value * 0.75
-
-        let drawFace: (CGFloat, CGFloat, String) -> Void = { hx, hy, mode in
+        let drawFace: (CGFloat, CGFloat, CGFloat, String) -> Void = { hx, hy, sc, mode in
+            let gx = gazeX * sc, gy = gazeY * sc
             if mode == "sleep" {
-                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 42 * S, cy: hy + 24 * S, sc: S)
-                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * S, cy: hy + 28 * S, sc: S, flipX: true)
-                drawBeagleSprite(in: ctx, "nose", cx: hx - 12 * S, cy: hy + 46 * S, sc: S)
-                let bubSc = S * (0.88 + 0.18 * sin(t * 2.2))
-                drawBeagleSprite(in: ctx, "bubble", cx: hx + 5 * S, cy: hy + 54 * S, sc: bubSc)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 42 * sc, cy: hy + 24 * sc, sc: sc)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * sc, cy: hy + 28 * sc, sc: sc, flipX: true)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 12 * sc, cy: hy + 46 * sc, sc: sc)
+                let bubSc = sc * (0.88 + 0.18 * sin(t * 2.2))
+                drawBeagleSprite(in: ctx, "bubble", cx: hx + 5 * sc, cy: hy + 54 * sc, sc: bubSc)
                 return
             }
             if blinking && mode != "angry" && mode != "lift" {
-                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 40 * S, cy: hy + 22 * S, sc: S)
-                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * S, cy: hy + 26 * S, sc: S, flipX: true)
-                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 44 * S, sc: S)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx - 40 * sc, cy: hy + 22 * sc, sc: sc)
+                drawBeagleSprite(in: ctx, "eyeClosed", cx: hx + 26 * sc, cy: hy + 26 * sc, sc: sc, flipX: true)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * sc, cy: hy + 44 * sc, sc: sc)
                 return
             }
             if mode == "angry" {
-                drawBeagleSprite(in: ctx, "angryFrameR", cx: hx - 38 * S, cy: hy + 18 * S, sc: S)
-                drawBeagleSprite(in: ctx, "angryFrameL", cx: hx + 28 * S, cy: hy + 24 * S, sc: S)
-                drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * S + gazeX * 0.6, cy: hy + 22 * S + gazeY * 0.6, sc: S)
-                drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * S + gazeX * 0.6, cy: hy + 28 * S + gazeY * 0.6, sc: S)
-                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 46 * S, sc: S)
+                drawBeagleSprite(in: ctx, "angryFrameR", cx: hx - 38 * sc, cy: hy + 18 * sc, sc: sc)
+                drawBeagleSprite(in: ctx, "angryFrameL", cx: hx + 28 * sc, cy: hy + 24 * sc, sc: sc)
+                drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * sc + gx * 0.6, cy: hy + 22 * sc + gy * 0.6, sc: sc)
+                drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * sc + gx * 0.6, cy: hy + 28 * sc + gy * 0.6, sc: sc)
+                drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * sc, cy: hy + 46 * sc, sc: sc)
                 let pulse: CGFloat = 1.0 + sin(t * 14.0) * 0.10
-                drawBeagleSprite(in: ctx, "angerMark", cx: hx + 36 * S, cy: hy - 44 * S, sc: S * pulse)
-                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * S, cy: hy - 36 * S, sc: S)
+                drawBeagleSprite(in: ctx, "angerMark", cx: hx + 36 * sc, cy: hy - 44 * sc, sc: sc * pulse)
+                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * sc, cy: hy - 36 * sc, sc: sc)
                 return
             }
-            drawBeagleSprite(in: ctx, "eyeFrameL", cx: hx - 38 * S, cy: hy + 16 * S, sc: S)
-            drawBeagleSprite(in: ctx, "eyeFrameR", cx: hx + 28 * S, cy: hy + 22 * S, sc: S)
-            drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * S + gazeX, cy: hy + 18 * S + gazeY, sc: S)
-            drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * S + gazeX, cy: hy + 24 * S + gazeY, sc: S)
+            drawBeagleSprite(in: ctx, "eyeFrameL", cx: hx - 38 * sc, cy: hy + 16 * sc, sc: sc)
+            drawBeagleSprite(in: ctx, "eyeFrameR", cx: hx + 28 * sc, cy: hy + 22 * sc, sc: sc)
+            drawBeagleSprite(in: ctx, "pupilL", cx: hx - 38 * sc + gx, cy: hy + 18 * sc + gy, sc: sc)
+            drawBeagleSprite(in: ctx, "pupilR", cx: hx + 28 * sc + gx, cy: hy + 24 * sc + gy, sc: sc)
             if mode == "happy" {
-                drawBeagleSprite(in: ctx, "eyeHi", cx: hx - 36 * S + gazeX * 0.5, cy: hy + 12 * S + gazeY * 0.5, sc: S)
-                drawBeagleSprite(in: ctx, "eyeHi", cx: hx + 30 * S + gazeX * 0.5, cy: hy + 18 * S + gazeY * 0.5, sc: S)
-                drawBeagleSprite(in: ctx, "blush", cx: hx - 60 * S, cy: hy + 44 * S, sc: S)
-                drawBeagleSprite(in: ctx, "blush", cx: hx + 42 * S, cy: hy + 48 * S, sc: S)
+                drawBeagleSprite(in: ctx, "eyeHi", cx: hx - 36 * sc + gx * 0.5, cy: hy + 12 * sc + gy * 0.5, sc: sc)
+                drawBeagleSprite(in: ctx, "eyeHi", cx: hx + 30 * sc + gx * 0.5, cy: hy + 18 * sc + gy * 0.5, sc: sc)
+                drawBeagleSprite(in: ctx, "blush", cx: hx - 60 * sc, cy: hy + 44 * sc, sc: sc)
+                drawBeagleSprite(in: ctx, "blush", cx: hx + 42 * sc, cy: hy + 48 * sc, sc: sc)
             } else if mode == "lift" {
-                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx - 36 * S + gazeX * 0.4, cy: hy + 16 * S + gazeY * 0.4, sc: S)
-                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx + 30 * S + gazeX * 0.4, cy: hy + 22 * S + gazeY * 0.4, sc: S)
-                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * S, cy: hy - 36 * S, sc: S)
+                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx - 36 * sc + gx * 0.4, cy: hy + 16 * sc + gy * 0.4, sc: sc)
+                drawBeagleSprite(in: ctx, "liftEyeHi", cx: hx + 30 * sc + gx * 0.4, cy: hy + 22 * sc + gy * 0.4, sc: sc)
+                drawBeagleSprite(in: ctx, "sweat", cx: hx - 44 * sc, cy: hy - 36 * sc, sc: sc)
             }
-            drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * S, cy: hy + 44 * S, sc: S)
+            drawBeagleSprite(in: ctx, "nose", cx: hx - 10 * sc, cy: hy + 44 * sc, sc: sc)
         }
 
+        // Pose 5: Scruff-Lifted Dangling Beagle
         if scruffS > 0.35 {
+            drawV2DeskOnly(1.0 - smoothstep(0.0, 0.48, scruffS), scruffS * 28.0)
             let swing = max(-0.5, min(0.5, physics.scruffSwing.value))
             let hx = seatX - 10 + swing * 18
             let hy = 132 + sin(t * 3.0) * 3.5
@@ -4835,7 +5043,7 @@ enum CatRenderer {
             drawBeagleSprite(in: ctx, "liftFrontPaw", cx: 18 * S, cy: 100 * S, sc: S, rot: -legSwing * 0.9)
             drawBeagleSprite(in: ctx, "earL", cx: -74 * S, cy: 12 * S, sc: S, rot: -swing * 0.35 + sin(t * 5.0) * 0.05)
             drawBeagleSprite(in: ctx, "head", cx: 0, cy: 0, sc: S)
-            drawFace(0, 0, "lift")
+            drawFace(0, 0, S, "lift")
             drawBeagleSprite(in: ctx, "earR", cx: 86 * S, cy: 22 * S, sc: S, rot: -swing * 0.35 - sin(t * 5.0) * 0.05)
             ctx.restoreGState()
             if physics.musicIntensity > 0.01 {
@@ -4844,45 +5052,145 @@ enum CatRenderer {
             return
         }
 
+        // Pose 4: Curled Sleeping Beagle (smooth cross-fade from desk)
         if sleepS > 0.45 {
+            drawV2DeskOnly(1.0 - smoothstep(0.45, 0.80, sleepS), smoothstep(0.45, 0.80, sleepS) * 34.0)
+            let slAlpha = smoothstep(0.45, 0.65, sleepS)
             let hx = seatX - 24
             let hy = 178 + breath * 0.7
             let tailWag = sin(t * 1.8) * 0.08
+            ctx.saveGState()
+            ctx.setAlpha(slAlpha)
             drawBeagleSprite(in: ctx, "sleepTail", cx: hx + 158 * S, cy: hy + 44 * S, sc: S, rot: tailWag)
             drawBeagleSprite(in: ctx, "sleepHindPaw", cx: hx + 104 * S, cy: hy + 68 * S, sc: S)
             drawBeagleSprite(in: ctx, "sleepBody", cx: hx + 54 * S, cy: hy + 22 * S + breath * 0.35, sc: S)
             drawBeagleSprite(in: ctx, "sleepEarL", cx: hx - 68 * S, cy: hy + 12 * S, sc: S)
             drawBeagleSprite(in: ctx, "sleepFrontPaw", cx: hx - 74 * S, cy: hy + 72 * S, sc: S)
             drawBeagleSprite(in: ctx, "head", cx: hx, cy: hy, sc: S)
-            drawFace(hx, hy, "sleep")
+            drawFace(hx, hy, S, "sleep")
             drawBeagleSprite(in: ctx, "sleepEarR", cx: hx + 70 * S, cy: hy + 18 * S, sc: S)
             drawBeagleSprite(in: ctx, "sleepFrontPaw", cx: hx + 18 * S, cy: hy + 74 * S, sc: S)
+            ctx.restoreGState()
             if physics.musicIntensity > 0.01 {
                 drawMusicHeadphones(in: ctx, center: CGPoint(x: hx, y: hy), physics: physics, eyeTheme: eyeTheme, skin: skin)
             }
             return
         }
 
-        let lTap: CGFloat = physics.leftPawTyping ? 1.0 : max(0, min(1, -physics.douniLeftRaise.value))
-        let rTap: CGFloat = physics.rightPawTyping ? 1.0 : max(0, min(1, -physics.douniRightRaise.value))
-        let hx = seatX + physics.headYaw.value * 4.5
-        let hy = 152 + breath * 0.8 + (lTap + rTap) * 2.2
-        let earBob = sin(t * 2.3 - 0.5) * 0.03 + (lTap - rTap) * 0.08
+        // Helper: draw Beagle paw segment in V2Space from shoulder to tip (natural short chubby reach!)
+        let drawBeagleV2Paw: (CGPoint, CGPoint) -> Void = { sh, tip in
+            let dx = tip.x - sh.x
+            let dy = tip.y - sh.y
+            let dist = max(60.0, hypot(dx, dy))
+            let baseLen = 104.0 * SB
+            let lenScale = max(0.76, min(1.62, dist / baseLen))
+            let angle = atan2(dy, dx)
+            ctx.saveGState()
+            ctx.translateBy(x: tip.x, y: tip.y)
+            ctx.rotate(by: angle - .pi)
+            ctx.scaleBy(x: lenScale, y: 1.0)
+            drawBeagleSprite(in: ctx, "paw", cx: 52 * SB, cy: 0, sc: SB)
+            ctx.restoreGState()
+        }
+
+        // Poses 1 / 2 / 3 in exact Xiao Douni V2Space (832x720) — identical layout, short paws, zero gap!
+        let angerShakeX: CGFloat = anger > 0.08 ? sin(t * 42.0) * 3.2 * anger : 0
+        let headBobY = abs(leftPose - rightPose) * 2.5 + breath * 1.4 + impY * 5.2 + anger * 5.0
+        let headTiltRad = -rightPose * 0.010 + leftPose * 0.012 + physics.headTilt.value * 0.10 + impT * 0.014
+        let earBob = sin(t * 2.3 - 0.5) * 0.03 + (leftPose - rightPose) * 0.04
         let faceMode = anger > 0.32 ? "angry" : (happy > 0.22 ? "happy" : "idle")
 
-        drawBeagleSprite(in: ctx, "body", cx: seatX + 4 * S, cy: hy + 88 * S, sc: S)
-        drawBeagleSprite(in: ctx, "paw", cx: hx - 92 * S, cy: hy + (72 + lTap * 18) * S, sc: S, rot: -lTap * 0.16)
         ctx.saveGState()
-        ctx.translateBy(x: hx, y: hy)
-        ctx.rotate(by: headTilt)
-        drawBeagleSprite(in: ctx, "earL", cx: -74 * S, cy: 12 * S, sc: S, rot: earBob)
-        drawBeagleSprite(in: ctx, "head", cx: 0, cy: 0, sc: S)
-        drawFace(0, 0, faceMode)
-        drawBeagleSprite(in: ctx, "paw", cx: -6 * S, cy: (96 + rTap * 18) * S, sc: S, rot: rTap * 0.14)
-        drawBeagleSprite(in: ctx, "earR", cx: 86 * S, cy: 22 * S, sc: S, rot: -earBob)
+        ctx.translateBy(x: deskTx, y: deskTy)
+        ctx.scaleBy(x: deskV2Scale, y: deskV2Scale)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+
+        // 1. Comic mouse or graphic tablet beside left paw
+        if isTablet {
+            drawDouniComicTablet(
+                in: ctx, physics: physics,
+                deckColor: kbDeckColor, bevelColor: kbBevelColor,
+                padColor: kbKeyColor, accentColor: kbAccentColor,
+                glowColor: glowBaseColor, eyeColor: eyeTheme.primaryColor,
+                ink: ink, lw: catLW, showParkedStylus: mouseBlend < 0.18
+            )
+        } else {
+            drawDouniComicMouse(
+                in: ctx, center: mouseCenter,
+                pressLeft: physics.mousePressLeft.value,
+                pressRight: physics.mousePressRight.value,
+                pressMiddle: physics.mousePressMiddle.value,
+                bodyColor: mouseBodyColor, bevelColor: kbBevelColor,
+                wheelColor: mouseWheelColor, glowColor: glowBaseColor,
+                ink: ink, lw: catLW
+            )
+        }
+
+        // 2. Beagle body + head + ears + expressive face behind angled keyboard (zero gap!)
+        ctx.saveGState()
+        ctx.translateBy(x: 582 + angerShakeX, y: 248 + headBobY)
+        ctx.rotate(by: headTiltRad)
+        drawBeagleSprite(in: ctx, "body", cx: 14 * SB, cy: 92 * SB, sc: SB)
+        drawBeagleSprite(in: ctx, "earL", cx: -74 * SB, cy: 12 * SB, sc: SB, rot: earBob)
+        drawBeagleSprite(in: ctx, "head", cx: 0, cy: 0, sc: SB)
+        drawFace(0, 0, SB, faceMode)
+        drawBeagleSprite(in: ctx, "earR", cx: 86 * SB, cy: 22 * SB, sc: SB, rot: -earBob)
         ctx.restoreGState()
+
+        // 3. Angled comic keyboard
+        drawDouniV2Keyboard(
+            in: ctx, physics: physics,
+            deckColor: kbDeckColor, bevelColor: kbBevelColor,
+            keyColor: kbKeyColor, accentColor: kbAccentColor,
+            glowColor: glowBaseColor, marquee: marquee,
+            ink: ink, lw: kbLW, impactY: impY, impactTilt: impT
+        )
+
+        // 4. Short chubby V2 paws matching Xiao Douni V2 kinematics
+        let lTarget = CGPoint(x: physics.douniLeftKeyTarget.point.x + impT * 10.0, y: physics.douniLeftKeyTarget.point.y + impY * 8.5)
+        let leftToolTarget = isTablet
+            ? CGPoint(x: v2Nib.x + 14.0, y: v2Nib.y - 12.0 + tabletPress * 5.0)
+            : CGPoint(x: mouseCenter.x + 10.0, y: mouseCenter.y - 2.0 + mousePress * 8.0)
+
+        let lIdleSh = CGPoint(x: 468, y: 344), lIdleTip = CGPoint(x: 242, y: 346)
+        let lSlamSh = CGPoint(x: 468, y: 350), lSlamTip = lTarget
+        let lHighSh = CGPoint(x: 468, y: 302), lHighTip = CGPoint(x: 258, y: 248)
+        let lMouseSh = CGPoint(x: 468, y: 326), lMouseTip = leftToolTarget
+        let lTypT = max(0, min(1.05, abs(leftPose)))
+        let lTypSh = leftPose >= 0 ? lerpPt(lIdleSh, lHighSh, lTypT) : lerpPt(lIdleSh, lSlamSh, lTypT)
+        let lTypTip = leftPose >= 0 ? lerpPt(lIdleTip, lHighTip, lTypT) : lerpPt(lIdleTip, lSlamTip, lTypT)
+        let lSh = mouseBlend > 0.01 ? lerpPt(lTypSh, lMouseSh, mouseBlend) : lTypSh
+        let lTip = mouseBlend > 0.01 ? lerpPt(lTypTip, lMouseTip, mouseBlend) : lTypTip
+        drawBeagleV2Paw(lSh, lTip)
+
+        if isTablet && mouseBlend > 0.18 {
+            let penAlpha = smoothstep(0.18, 0.42, mouseBlend)
+            ctx.saveGState()
+            ctx.setAlpha(penAlpha)
+            ctx.translateBy(x: v2Nib.x, y: v2Nib.y + tabletPress * 4.0)
+            ctx.rotate(by: -2.14 + physics.tabletPenTilt.value)
+            drawDouniComicStylus(
+                in: ctx, length: 124.0, accentColor: glowBaseColor,
+                eyeColor: eyeTheme.primaryColor, ink: ink, lw: catLW, pressed: tabletPress
+            )
+            ctx.restoreGState()
+        }
+
+        let rTarget = CGPoint(x: physics.douniRightKeyTarget.point.x + impT * 10.0, y: physics.douniRightKeyTarget.point.y + impY * 8.5)
+        let rIdleSh = CGPoint(x: 616, y: 374), rIdleTip = CGPoint(x: 410, y: 368)
+        let rSlamSh = CGPoint(x: 604, y: 372), rSlamTip = rTarget
+        let rHighSh = CGPoint(x: 622, y: 356), rHighTip = CGPoint(x: 422, y: 294)
+        let rTypT = max(0, min(1.05, abs(rightPose)))
+        let rSh = rightPose >= 0 ? lerpPt(rIdleSh, rHighSh, rTypT) : lerpPt(rIdleSh, rSlamSh, rTypT)
+        let rTip = rightPose >= 0 ? lerpPt(rIdleTip, rHighTip, rTypT) : lerpPt(rIdleTip, rSlamTip, rTypT)
+        drawBeagleV2Paw(rSh, rTip)
+
+        ctx.restoreGState()
+
         if physics.musicIntensity > 0.01 {
-            drawMusicHeadphones(in: ctx, center: CGPoint(x: hx, y: hy), physics: physics, eyeTheme: eyeTheme, skin: skin)
+            let headCenter = CGPoint(x: deskTx + (582 + angerShakeX) * deskV2Scale, y: deskTy + (248 + headBobY) * deskV2Scale)
+            drawMusicHeadphones(in: ctx, center: headCenter, physics: physics, eyeTheme: eyeTheme, skin: skin)
         }
     }
 

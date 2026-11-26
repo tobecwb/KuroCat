@@ -3,6 +3,9 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <unordered_map>
+#include <initializer_list>
+#include <cstdint>
 #include "CatPhysics.hpp"
 #include "../../shared/SkinSpec.hpp"
 #include "../../shared/KeyboardSkinSpec.hpp"
@@ -17,6 +20,140 @@ enum class CatHitZone {
 struct RGBA {
     double r, g, b, a;
 };
+
+namespace detail {
+struct GradStop {
+    double offset, r, g, b, a;
+};
+
+class CairoPatternCache {
+public:
+    static CairoPatternCache& instance() {
+        static CairoPatternCache inst;
+        return inst;
+    }
+
+    cairo_pattern_t* getLinear(double x0, double y0, double x1, double y1, std::initializer_list<GradStop> stops) {
+        uint64_t h = 14695981039346656037ULL;
+        auto mix = [&](int64_t v) {
+            h ^= (uint64_t)v;
+            h *= 1099511628211ULL;
+        };
+        mix(1);
+        mix((int64_t)std::llround(x0 * 1000.0));
+        mix((int64_t)std::llround(y0 * 1000.0));
+        mix((int64_t)std::llround(x1 * 1000.0));
+        mix((int64_t)std::llround(y1 * 1000.0));
+        for (const auto& s : stops) {
+            mix((int64_t)std::llround(s.offset * 1000.0));
+            mix((int64_t)std::llround(s.r * 1000.0));
+            mix((int64_t)std::llround(s.g * 1000.0));
+            mix((int64_t)std::llround(s.b * 1000.0));
+            mix((int64_t)std::llround(s.a * 1000.0));
+        }
+        auto it = cache_.find(h);
+        if (it != cache_.end()) return it->second;
+        if (cache_.size() >= 256) clear();
+        cairo_pattern_t* pat = cairo_pattern_create_linear(x0, y0, x1, y1);
+        for (const auto& s : stops) {
+            cairo_pattern_add_color_stop_rgba(pat, s.offset, s.r, s.g, s.b, s.a);
+        }
+        cache_.emplace(h, pat);
+        return pat;
+    }
+
+    cairo_pattern_t* getRadial(double cx0, double cy0, double r0, double cx1, double cy1, double r1, std::initializer_list<GradStop> stops) {
+        uint64_t h = 14695981039346656037ULL;
+        auto mix = [&](int64_t v) {
+            h ^= (uint64_t)v;
+            h *= 1099511628211ULL;
+        };
+        mix(2);
+        mix((int64_t)std::llround(cx0 * 1000.0));
+        mix((int64_t)std::llround(cy0 * 1000.0));
+        mix((int64_t)std::llround(r0 * 1000.0));
+        mix((int64_t)std::llround(cx1 * 1000.0));
+        mix((int64_t)std::llround(cy1 * 1000.0));
+        mix((int64_t)std::llround(r1 * 1000.0));
+        for (const auto& s : stops) {
+            mix((int64_t)std::llround(s.offset * 1000.0));
+            mix((int64_t)std::llround(s.r * 1000.0));
+            mix((int64_t)std::llround(s.g * 1000.0));
+            mix((int64_t)std::llround(s.b * 1000.0));
+            mix((int64_t)std::llround(s.a * 1000.0));
+        }
+        auto it = cache_.find(h);
+        if (it != cache_.end()) return it->second;
+        if (cache_.size() >= 256) clear();
+        cairo_pattern_t* pat = cairo_pattern_create_radial(cx0, cy0, r0, cx1, cy1, r1);
+        for (const auto& s : stops) {
+            cairo_pattern_add_color_stop_rgba(pat, s.offset, s.r, s.g, s.b, s.a);
+        }
+        cache_.emplace(h, pat);
+        return pat;
+    }
+
+    ~CairoPatternCache() { clear(); }
+
+private:
+    void clear() {
+        for (auto& kv : cache_) {
+            if (kv.second) cairo_pattern_destroy(kv.second);
+        }
+        cache_.clear();
+    }
+    std::unordered_map<uint64_t, cairo_pattern_t*> cache_;
+};
+
+class BakedSurfaceCache {
+public:
+    static BakedSurfaceCache& instance() {
+        static BakedSurfaceCache inst;
+        return inst;
+    }
+
+    cairo_surface_t* find(uint64_t key) const {
+        auto it = cache_.find(key);
+        return (it != cache_.end()) ? it->second : nullptr;
+    }
+
+    void insert(uint64_t key, cairo_surface_t* surf) {
+        if (!surf) return;
+        if (cache_.size() >= 48) clear();
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            if (it->second) cairo_surface_destroy(it->second);
+            it->second = surf;
+        } else {
+            cache_.emplace(key, surf);
+        }
+    }
+
+    ~BakedSurfaceCache() { clear(); }
+
+private:
+    void clear() {
+        for (auto& kv : cache_) {
+            if (kv.second) cairo_surface_destroy(kv.second);
+        }
+        cache_.clear();
+    }
+    std::unordered_map<uint64_t, cairo_surface_t*> cache_;
+};
+
+inline uint64_t hashSkinPartKey(const std::string& skinId, uint64_t partTag, size_t count, double pixelScale) {
+    uint64_t h = 14695981039346656037ULL;
+    auto mix = [&](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ULL;
+    };
+    for (unsigned char c : skinId) mix(c);
+    mix(partTag);
+    mix((uint64_t)count);
+    mix((uint64_t)std::llround(pixelScale * 100.0));
+    return h;
+}
+} // namespace detail
 
 // The four built-in coats expressed as SkinSpecs. Colours are the exact doubles the Cairo renderer
 // always used, so built-ins render pixel-identically to the pre-SkinSpec renderer; the exported
@@ -87,7 +224,7 @@ inline const SkinSpec& builtInSkin(CatCoatTheme coat) {
 class CatRenderer {
 public:
     static CatHitZone hitTest(Pt p, const CatPhysics& physics, const SkinSpec& skin) {
-        if (skin.renderStyle == SkinRenderStyle::Douni) {
+        if (skin.renderStyle == SkinRenderStyle::Douni || skin.renderStyle == SkinRenderStyle::Beagle) {
             float loaf = std::clamp(physics.douniLoafBlend.value, 0.0f, 1.0f);
             float loafS = loaf * loaf * (3.0f - 2.0f * loaf);
             float scruff = std::clamp(physics.scruffDrag.value, 0.0f, 1.0f);
@@ -661,15 +798,15 @@ private:
             double radius = std::max(2.2, baseW * 1.15);
             double stepDist = std::max(1.4, radius * 0.34);
             auto stamp = [&](double x, double y) {
-                cairo_pattern_t* pat = cairo_pattern_create_radial(x, y, 0.0, x, y, radius);
-                cairo_pattern_add_color_stop_rgba(pat, 0.0, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.34);
-                cairo_pattern_add_color_stop_rgba(pat, 0.45, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.16);
-                cairo_pattern_add_color_stop_rgba(pat, 1.0, mark.color.r, mark.color.g, mark.color.b, 0.0);
+                cairo_pattern_t* pat = detail::CairoPatternCache::instance().getRadial(x, y, 0.0, x, y, radius, {
+                    {0.0, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.34},
+                    {0.45, mark.color.r, mark.color.g, mark.color.b, mark.color.a * 0.16},
+                    {1.0, mark.color.r, mark.color.g, mark.color.b, 0.0}
+                });
                 cairo_set_source(cr, pat);
                 cairo_new_path(cr);
                 cairo_arc(cr, x, y, radius, 0.0, 2.0 * M_PI);
                 cairo_fill(cr);
-                cairo_pattern_destroy(pat);
             };
             if (mapped.size() == 1) {
                 stamp(mapped[0].x, mapped[0].y);
@@ -2236,6 +2373,81 @@ private:
             }
 
             // Curve regions: body regions below the jaw line first, then head/skull above it.
+            bool useBakedMarks = !isBuiltInPatterned(skin) && (skin.marks.size() + skin.regions.size() >= 8);
+            if (useBakedMarks) {
+                cairo_matrix_t cm;
+                cairo_get_matrix(cr, &cm);
+                double bakeScale = std::clamp(std::hypot(cm.xx, cm.xy), 1.0, 3.0);
+                // 1) Bake Body regions + marks in local Body space
+                uint64_t bodyKey = detail::hashSkinPartKey(skin.id, 1, skin.marks.size() + skin.regions.size(), bakeScale);
+                cairo_surface_t* bodySurf = detail::BakedSurfaceCache::instance().find(bodyKey);
+                const int bw = (int)std::ceil(280.0 * bakeScale);
+                const int bh = (int)std::ceil(280.0 * bakeScale);
+                if (!bodySurf) {
+                    bodySurf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, bw, bh);
+                    cairo_t* bcr = cairo_create(bodySurf);
+                    cairo_scale(bcr, bakeScale, bakeScale);
+                    cairo_translate(bcr, 140.0, 140.0);
+                    auto localBodyMap = [&](const auto& p) -> Pt {
+                        Pt w = bodyMap(p);
+                        return { w.x - seatX, w.y - seatY };
+                    };
+                    for (const SkinRegion& r : skin.regions) {
+                        if (r.space == SkinSpace::Body) drawRegion(bcr, r, localBodyMap);
+                    }
+                    for (const SkinMark& m : skin.marks) {
+                        if (m.space == SkinSpace::Body) drawMark(bcr, m, localBodyMap);
+                    }
+                    cairo_destroy(bcr);
+                    detail::BakedSurfaceCache::instance().insert(bodyKey, bodySurf);
+                }
+                cairo_save(cr);
+                jawSide(cr, false, skin, headCenter, physics);
+                cairo_clip(cr);
+                cairo_translate(cr, seatX, seatY);
+                cairo_scale(cr, 1.0 / bakeScale, 1.0 / bakeScale);
+                cairo_set_source_surface(cr, bodySurf, -bw * 0.5, -bh * 0.5);
+                cairo_paint(cr);
+                cairo_restore(cr);
+
+                // 2) Bake Head/Skull regions + marks in local Head space
+                uint64_t headKey = detail::hashSkinPartKey(skin.id, 2, skin.marks.size() + skin.regions.size(), bakeScale);
+                cairo_surface_t* headSurf = detail::BakedSurfaceCache::instance().find(headKey);
+                const int hw = (int)std::ceil(240.0 * bakeScale);
+                const int hh = (int)std::ceil(240.0 * bakeScale);
+                if (!headSurf) {
+                    headSurf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, hw, hh);
+                    cairo_t* hcr = cairo_create(headSurf);
+                    cairo_scale(hcr, bakeScale, bakeScale);
+                    cairo_translate(hcr, 120.0, 120.0);
+                    auto localHeadMap = [&](const auto& p) -> Pt {
+                        Pt w = headMap(p);
+                        return { w.x - headCenter.x, w.y - headCenter.y };
+                    };
+                    auto localSkullMap = [&](const auto& p) -> Pt {
+                        Pt w = skullMap(p);
+                        return { w.x - headCenter.x, w.y - headCenter.y };
+                    };
+                    for (const SkinRegion& r : skin.regions) {
+                        if (r.space == SkinSpace::Skull) drawRegion(hcr, r, localSkullMap);
+                        else if (r.space == SkinSpace::Head) drawRegion(hcr, r, localHeadMap);
+                    }
+                    for (const SkinMark& m : skin.marks) {
+                        if (m.space == SkinSpace::Skull) drawMark(hcr, m, localSkullMap);
+                        else if (m.space == SkinSpace::Head) drawMark(hcr, m, localHeadMap);
+                    }
+                    cairo_destroy(hcr);
+                    detail::BakedSurfaceCache::instance().insert(headKey, headSurf);
+                }
+                cairo_save(cr);
+                jawSide(cr, true, skin, headCenter, physics);
+                cairo_clip(cr);
+                cairo_translate(cr, headCenter.x, headCenter.y);
+                cairo_scale(cr, 1.0 / bakeScale, 1.0 / bakeScale);
+                cairo_set_source_surface(cr, headSurf, -hw * 0.5, -hh * 0.5);
+                cairo_paint(cr);
+                cairo_restore(cr);
+            } else {
             for (const SkinRegion& r : skin.regions) {
                 if (r.space != SkinSpace::Body) continue;
                 cairo_save(cr);
@@ -2278,6 +2490,7 @@ private:
                         }
                     }
                 }
+            }
             }
             cairo_restore(cr);
         }
@@ -3124,13 +3337,13 @@ private:
         if (skin.colorpoint()) {
             cairo_save(cr);
             roundedRect(cr, bottom.x - 7.5, top.y, 15.0, bottom.y - top.y + 5.0, 6.5);
-            cairo_pattern_t* grad = cairo_pattern_create_linear(top.x, top.y, bottom.x, bottom.y + 5.0);
-            cairo_pattern_add_color_stop_rgba(grad, 0.05, pal.body.r, pal.body.g, pal.body.b, 0.0);
-            cairo_pattern_add_color_stop_rgba(grad, 0.50, pal.pointsMid.r, pal.pointsMid.g, pal.pointsMid.b, pal.pointsMid.a * 0.75);
-            cairo_pattern_add_color_stop_rgba(grad, 0.82, pal.points.r, pal.points.g, pal.points.b, pal.points.a);
+            cairo_pattern_t* grad = detail::CairoPatternCache::instance().getLinear(top.x, top.y, bottom.x, bottom.y + 5.0, {
+                {0.05, pal.body.r, pal.body.g, pal.body.b, 0.0},
+                {0.50, pal.pointsMid.r, pal.pointsMid.g, pal.pointsMid.b, pal.pointsMid.a * 0.75},
+                {0.82, pal.points.r, pal.points.g, pal.points.b, pal.points.a}
+            });
             cairo_set_source(cr, grad);
             cairo_fill(cr);
-            cairo_pattern_destroy(grad);
             cairo_restore(cr);
         } else {
             // Smooth shoulder-fade leg fill so palette.legs shows cleanly on idle sitting legs too
@@ -3629,75 +3842,132 @@ private:
         using namespace beagle_atlas;
         EyeColorTheme eyeTheme = settings.eyeTheme;
         double scruff = std::clamp((double)physics.scruffDrag.value, 0.0, 1.0);
-        double scruffS = scruff * scruff * (3.0 - 2.0 * scruff);
+        double scruffS = smoothstepD(0.0, 1.0, scruff);
         double lie = std::clamp((double)physics.lieIntensity.value, 0.0, 1.0);
-        double sleepVal = std::max(lie, physics.sleepiness > 0.55f ? std::min(1.0, ((double)physics.sleepiness - 0.55) / 0.35) : 0.0);
-        double sleepS = (sleepVal * sleepVal * (3.0 - 2.0 * sleepVal)) * (1.0 - scruffS);
+        double sleepVal = std::max(lie, physics.sleepiness > 0.48f ? std::min(1.0, ((double)physics.sleepiness - 0.48) / 0.35) : 0.0);
+        double sleepS = smoothstepD(0.0, 1.0, sleepVal) * (1.0 - scruffS);
         double anger = std::clamp((double)physics.angerIntensity.value, 0.0, 1.0);
         double happy = std::max((double)physics.petHeadIntensity, (double)physics.petBodyIntensity);
         double t = (double)physics.time;
         double breath = std::sin(t * 2.3) * 1.6;
         double seatX = CatPhysics::SeatAnchor.x + physics.bodyShiftX.value;
 
-        if (scruffS < 0.50) {
-            if (physics.isTabletActive) drawTablet(cr, physics, settings.keyboardTheme, eyeTheme);
-            else drawMouse(cr, physics, kbSkin);
-            drawKeyboard(cr, physics, kbSkin, eyeTheme, settings.showKeyLegends, settings.keyboardMarquee, settings.flipHorizontal);
-        }
+        constexpr double deskV2Scale = 0.405;
+        double deskTx = 14.0 + physics.bodyShiftX.value;
+        constexpr double deskTy = 22.0;
+
+        bool useDefaultRetroGrey = (kbSkin.id == "builtin:0");
+        RGBA kbDeckColor    = useDefaultRetroGrey ? RGBA{ 0.725, 0.733, 0.733, 1.0 } : toRGBA(kbSkin.deck);
+        RGBA kbBevelColor   = useDefaultRetroGrey ? RGBA{ 0.608, 0.616, 0.612, 1.0 } : toRGBA(kbSkin.base);
+        RGBA kbKeyColor     = useDefaultRetroGrey ? RGBA{ 0.698, 0.706, 0.702, 1.0 } : toRGBA(kbSkin.key);
+        RGBA kbAccentColor  = useDefaultRetroGrey ? RGBA{ 0.658, 0.666, 0.662, 1.0 } : toRGBA(kbSkin.accent);
+        RGBA mouseBodyColor = useDefaultRetroGrey ? RGBA{ 0.745, 0.753, 0.753, 1.0 } : toRGBA(kbSkin.mouseBody);
+        RGBA mouseWheelColor = useDefaultRetroGrey ? RGBA{ 0.36, 0.35, 0.34, 1.0 } : toRGBA(kbSkin.wheel);
+        RGBA baseGlow       = useDefaultRetroGrey ? RGBA{ 1.0, 0.84, 0.24, 1.0 } : eyeGlow(eyeTheme);
+        RGBA glowBaseColor  = anger > 0.05
+            ? blend(baseGlow, RGBA{ 1.0, 0.34, 0.14, 1.0 }, std::min(0.88, anger * 0.88))
+            : baseGlow;
+        RGBA eyeCol = eyePrimary(eyeTheme);
+        RGBA ink = skin.palette.outline.set ? toRGBA(skin.palette.outline) : douniInkColor;
+        constexpr double catLW = 10.8;
+        constexpr double kbLW = 12.6;
+
+        double impY = std::clamp((double)physics.kbImpactY.value, -0.4, 1.3);
+        double impT = std::clamp((double)physics.kbImpactTilt.value, -0.9, 0.9);
+        double leftPose = std::clamp((double)physics.douniLeftRaise.value, -1.08, 1.08);
+        double rightPose = std::clamp((double)physics.douniRightRaise.value, -1.08, 1.08);
+        double mouseBlend = std::clamp((double)physics.douniMouseBlend.value, 0.0, 1.0);
+        bool isTablet = physics.isTabletActive;
+
+        PtD mouseCenter = {
+            168.0 + (double)physics.mouseOffset.point().x * 5.2,
+            286.0 + (double)physics.mouseOffset.point().y * 4.5
+        };
+        double mousePress = (double)std::max(physics.mousePressLeft.value, std::max(physics.mousePressRight.value, physics.mousePressMiddle.value));
+        auto nibUV = douniTabletUV(physics.tabletNib.point());
+        PtD v2Nib = v2TabletPointD(nibUV.first, nibUV.second);
+        double tabletPress = std::clamp((double)physics.tabletPenPress.value, 0.0, 1.0);
+
+        auto drawV2DeskOnly = [&](double alpha, double dropY) {
+            if (alpha <= 0.01) return;
+            cairo_save(cr);
+            bool grouped = alpha < 0.995;
+            if (grouped) cairo_push_group(cr);
+            cairo_translate(cr, deskTx, deskTy + dropY);
+            cairo_scale(cr, deskV2Scale, deskV2Scale);
+            cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            if (isTablet) {
+                drawDouniComicTablet(cr, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor,
+                                     glowBaseColor, eyeCol, ink, catLW, mouseBlend < 0.18);
+            } else {
+                drawDouniComicMouse(cr, mouseCenter, (double)physics.mousePressLeft.value, (double)physics.mousePressRight.value,
+                                    mouseBodyColor, kbBevelColor, mouseWheelColor, glowBaseColor, ink, catLW, (double)physics.mousePressMiddle.value);
+            }
+            drawDouniV2Keyboard(cr, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor, glowBaseColor,
+                                settings.keyboardMarquee, ink, kbLW, impY, impT);
+            if (grouped) {
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, alpha);
+            }
+            cairo_restore(cr);
+        };
 
         cairo_surface_t* atlas = getBeagleAtlasSurface();
-        if (!atlas) return;
+        if (!atlas) { if (scruffS < 0.50) drawV2DeskOnly(1.0, 0.0); return; }
 
         const double S = 0.56;
-        double gazeX = std::clamp((double)physics.eyeGaze.point().x, -1.0, 1.0) * 4.5 * S;
-        double gazeY = std::clamp((double)physics.eyeGaze.point().y, -1.0, 1.0) * 3.5 * S;
+        const double SB = 1.48;
+        double gazeX = std::clamp((double)physics.eyeGaze.point().x, -1.0, 1.0) * 4.5;
+        double gazeY = std::clamp((double)physics.eyeGaze.point().y, -1.0, 1.0) * 3.5;
         bool blinking = physics.blinkProgress() > 0.55f;
-        double headTilt = (double)physics.headTilt.value * 0.75;
 
-        auto drawFace = [&](double hx, double hy, int mode) {
+        auto drawFace = [&](double hx, double hy, double sc, int mode) {
+            double gx = gazeX * sc, gy = gazeY * sc;
             if (mode == 3) {
-                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx - 42*S, hy + 24*S, S);
-                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx + 26*S, hy + 28*S, S, 0.0, true);
-                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 12*S, hy + 46*S, S);
-                double bubSc = S * (0.88 + 0.18 * std::sin(t * 2.2));
-                drawBeagleSprite(cr, atlas, SP_BUBBLE, hx + 5*S, hy + 54*S, bubSc);
+                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx - 42*sc, hy + 24*sc, sc);
+                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx + 26*sc, hy + 28*sc, sc, 0.0, true);
+                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 12*sc, hy + 46*sc, sc);
+                double bubSc = sc * (0.88 + 0.18 * std::sin(t * 2.2));
+                drawBeagleSprite(cr, atlas, SP_BUBBLE, hx + 5*sc, hy + 54*sc, bubSc);
                 return;
             }
             if (blinking && mode != 2 && mode != 4) {
-                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx - 40*S, hy + 22*S, S);
-                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx + 26*S, hy + 26*S, S, 0.0, true);
-                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*S, hy + 44*S, S);
+                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx - 40*sc, hy + 22*sc, sc);
+                drawBeagleSprite(cr, atlas, SP_EYE_CLOSED, hx + 26*sc, hy + 26*sc, sc, 0.0, true);
+                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*sc, hy + 44*sc, sc);
                 return;
             }
             if (mode == 2) {
-                drawBeagleSprite(cr, atlas, SP_ANGRY_FRAME_R, hx - 38*S, hy + 18*S, S);
-                drawBeagleSprite(cr, atlas, SP_ANGRY_FRAME_L, hx + 28*S, hy + 24*S, S);
-                drawBeagleSprite(cr, atlas, SP_PUPIL_L, hx - 38*S + gazeX*0.6, hy + 22*S + gazeY*0.6, S);
-                drawBeagleSprite(cr, atlas, SP_PUPIL_R, hx + 28*S + gazeX*0.6, hy + 28*S + gazeY*0.6, S);
-                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*S, hy + 46*S, S);
+                drawBeagleSprite(cr, atlas, SP_ANGRY_FRAME_R, hx - 38*sc, hy + 18*sc, sc);
+                drawBeagleSprite(cr, atlas, SP_ANGRY_FRAME_L, hx + 28*sc, hy + 24*sc, sc);
+                drawBeagleSprite(cr, atlas, SP_PUPIL_L, hx - 38*sc + gx*0.6, hy + 22*sc + gy*0.6, sc);
+                drawBeagleSprite(cr, atlas, SP_PUPIL_R, hx + 28*sc + gx*0.6, hy + 28*sc + gy*0.6, sc);
+                drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*sc, hy + 46*sc, sc);
                 double pulse = 1.0 + std::sin(t * 14.0) * 0.10;
-                drawBeagleSprite(cr, atlas, SP_ANGER_MARK, hx + 36*S, hy - 44*S, S * pulse);
-                drawBeagleSprite(cr, atlas, SP_SWEAT, hx - 44*S, hy - 36*S, S);
+                drawBeagleSprite(cr, atlas, SP_ANGER_MARK, hx + 36*sc, hy - 44*sc, sc * pulse);
+                drawBeagleSprite(cr, atlas, SP_SWEAT, hx - 44*sc, hy - 36*sc, sc);
                 return;
             }
-            drawBeagleSprite(cr, atlas, SP_EYE_FRAME_L, hx - 38*S, hy + 16*S, S);
-            drawBeagleSprite(cr, atlas, SP_EYE_FRAME_R, hx + 28*S, hy + 22*S, S);
-            drawBeagleSprite(cr, atlas, SP_PUPIL_L, hx - 38*S + gazeX, hy + 18*S + gazeY, S);
-            drawBeagleSprite(cr, atlas, SP_PUPIL_R, hx + 28*S + gazeX, hy + 24*S + gazeY, S);
+            drawBeagleSprite(cr, atlas, SP_EYE_FRAME_L, hx - 38*sc, hy + 16*sc, sc);
+            drawBeagleSprite(cr, atlas, SP_EYE_FRAME_R, hx + 28*sc, hy + 22*sc, sc);
+            drawBeagleSprite(cr, atlas, SP_PUPIL_L, hx - 38*sc + gx, hy + 18*sc + gy, sc);
+            drawBeagleSprite(cr, atlas, SP_PUPIL_R, hx + 28*sc + gx, hy + 24*sc + gy, sc);
             if (mode == 1) {
-                drawBeagleSprite(cr, atlas, SP_EYE_HI, hx - 36*S + gazeX*0.5, hy + 12*S + gazeY*0.5, S);
-                drawBeagleSprite(cr, atlas, SP_EYE_HI, hx + 30*S + gazeX*0.5, hy + 18*S + gazeY*0.5, S);
-                drawBeagleSprite(cr, atlas, SP_BLUSH, hx - 60*S, hy + 44*S, S);
-                drawBeagleSprite(cr, atlas, SP_BLUSH, hx + 42*S, hy + 48*S, S);
+                drawBeagleSprite(cr, atlas, SP_EYE_HI, hx - 36*sc + gx*0.5, hy + 12*sc + gy*0.5, sc);
+                drawBeagleSprite(cr, atlas, SP_EYE_HI, hx + 30*sc + gx*0.5, hy + 18*sc + gy*0.5, sc);
+                drawBeagleSprite(cr, atlas, SP_BLUSH, hx - 60*sc, hy + 44*sc, sc);
+                drawBeagleSprite(cr, atlas, SP_BLUSH, hx + 42*sc, hy + 48*sc, sc);
             } else if (mode == 4) {
-                drawBeagleSprite(cr, atlas, SP_LIFT_EYE_HI, hx - 36*S + gazeX*0.4, hy + 16*S + gazeY*0.4, S);
-                drawBeagleSprite(cr, atlas, SP_LIFT_EYE_HI, hx + 30*S + gazeX*0.4, hy + 22*S + gazeY*0.4, S);
-                drawBeagleSprite(cr, atlas, SP_SWEAT, hx - 44*S, hy - 36*S, S);
+                drawBeagleSprite(cr, atlas, SP_LIFT_EYE_HI, hx - 36*sc + gx*0.4, hy + 16*sc + gy*0.4, sc);
+                drawBeagleSprite(cr, atlas, SP_LIFT_EYE_HI, hx + 30*sc + gx*0.4, hy + 22*sc + gy*0.4, sc);
+                drawBeagleSprite(cr, atlas, SP_SWEAT, hx - 44*sc, hy - 36*sc, sc);
             }
-            drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*S, hy + 44*S, S);
+            drawBeagleSprite(cr, atlas, SP_NOSE, hx - 10*sc, hy + 44*sc, sc);
         };
 
         if (scruffS > 0.35) {
+            drawV2DeskOnly(1.0 - smoothstepD(0.0, 0.48, scruffS), scruffS * 28.0);
             double swing = std::clamp((double)physics.scruffSwing.value, -0.5, 0.5);
             double hx = seatX - 10.0 + swing * 18.0;
             double hy = 132.0 + std::sin(t * 3.0) * 3.5;
@@ -3713,45 +3983,123 @@ private:
             drawBeagleSprite(cr, atlas, SP_LIFT_FRONT_PAW, 18*S, 100*S, S, -legSwing * 0.9);
             drawBeagleSprite(cr, atlas, SP_EAR_L, -74*S, 12*S, S, -swing * 0.35 + std::sin(t * 5.0) * 0.05);
             drawBeagleSprite(cr, atlas, SP_HEAD, 0, 0, S);
-            drawFace(0, 0, 4);
+            drawFace(0, 0, S, 4);
             drawBeagleSprite(cr, atlas, SP_EAR_R, 86*S, 22*S, S, -swing * 0.35 - std::sin(t * 5.0) * 0.05);
             cairo_restore(cr);
             if (physics.musicIntensity > 0.01f) drawMusicHeadphones(cr, { (float)hx, (float)hy }, physics, eyeTheme, skin);
             return;
         }
         if (sleepS > 0.45) {
+            drawV2DeskOnly(1.0 - smoothstepD(0.45, 0.80, sleepS), smoothstepD(0.45, 0.80, sleepS) * 34.0);
+            double slAlpha = smoothstepD(0.45, 0.65, sleepS);
             double hx = seatX - 24.0, hy = 178.0 + breath * 0.7;
+            cairo_save(cr);
+            bool gr = slAlpha < 0.995;
+            if (gr) cairo_push_group(cr);
             drawBeagleSprite(cr, atlas, SP_SLEEP_TAIL, hx + 158*S, hy + 44*S, S, std::sin(t * 1.8) * 0.08);
             drawBeagleSprite(cr, atlas, SP_SLEEP_HIND_PAW, hx + 104*S, hy + 68*S, S);
             drawBeagleSprite(cr, atlas, SP_SLEEP_BODY, hx + 54*S, hy + 22*S + breath * 0.35, S);
             drawBeagleSprite(cr, atlas, SP_SLEEP_EAR_L, hx - 68*S, hy + 12*S, S);
             drawBeagleSprite(cr, atlas, SP_SLEEP_FRONT_PAW, hx - 74*S, hy + 72*S, S);
             drawBeagleSprite(cr, atlas, SP_HEAD, hx, hy, S);
-            drawFace(hx, hy, 3);
+            drawFace(hx, hy, S, 3);
             drawBeagleSprite(cr, atlas, SP_SLEEP_EAR_R, hx + 70*S, hy + 18*S, S);
             drawBeagleSprite(cr, atlas, SP_SLEEP_FRONT_PAW, hx + 18*S, hy + 74*S, S);
+            if (gr) {
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, slAlpha);
+            }
+            cairo_restore(cr);
             if (physics.musicIntensity > 0.01f) drawMusicHeadphones(cr, { (float)hx, (float)hy }, physics, eyeTheme, skin);
             return;
         }
-        double lTap = physics.leftPawTyping ? 1.0 : std::clamp((double)-physics.douniLeftRaise.value, 0.0, 1.0);
-        double rTap = physics.rightPawTyping ? 1.0 : std::clamp((double)-physics.douniRightRaise.value, 0.0, 1.0);
-        double hx = seatX + physics.headYaw.value * 4.5;
-        double hy = 152.0 + breath * 0.8 + (lTap + rTap) * 2.2;
-        double earBob = std::sin(t * 2.3 - 0.5) * 0.03 + (lTap - rTap) * 0.08;
+
+        auto drawBeagleV2Paw = [&](PtD sh, PtD tip) {
+            double dx = tip.x - sh.x, dy = tip.y - sh.y;
+            double dist = std::max(60.0, std::hypot(dx, dy));
+            double lenScale = std::clamp(dist / (104.0 * SB), 0.76, 1.62);
+            double angle = std::atan2(dy, dx);
+            cairo_save(cr);
+            cairo_translate(cr, tip.x, tip.y);
+            cairo_rotate(cr, angle - 3.14159265358979);
+            cairo_scale(cr, lenScale, 1.0);
+            drawBeagleSprite(cr, atlas, SP_PAW, 52.0 * SB, 0.0, SB);
+            cairo_restore(cr);
+        };
+
+        double angerShakeX = (anger > 0.08) ? std::sin(t * 42.0) * 3.2 * anger : 0.0;
+        double headBobY = std::fabs(leftPose - rightPose) * 2.5 + breath * 1.4 + impY * 5.2 + anger * 5.0;
+        double headTiltRad = -rightPose * 0.010 + leftPose * 0.012 + (double)physics.headTilt.value * 0.10 + impT * 0.014;
+        double earBob = std::sin(t * 2.3 - 0.5) * 0.03 + (leftPose - rightPose) * 0.04;
         int faceMode = anger > 0.32 ? 2 : (happy > 0.22 ? 1 : 0);
 
-        drawBeagleSprite(cr, atlas, SP_BODY, seatX + 4*S, hy + 88*S, S);
-        drawBeagleSprite(cr, atlas, SP_PAW, hx - 92*S, hy + (72 + lTap*18)*S, S, -lTap * 0.16);
         cairo_save(cr);
-        cairo_translate(cr, hx, hy);
-        cairo_rotate(cr, headTilt);
-        drawBeagleSprite(cr, atlas, SP_EAR_L, -74*S, 12*S, S, earBob);
-        drawBeagleSprite(cr, atlas, SP_HEAD, 0, 0, S);
-        drawFace(0, 0, faceMode);
-        drawBeagleSprite(cr, atlas, SP_PAW, -6*S, (96 + rTap*18)*S, S, rTap * 0.14);
-        drawBeagleSprite(cr, atlas, SP_EAR_R, 86*S, 22*S, S, -earBob);
+        cairo_translate(cr, deskTx, deskTy);
+        cairo_scale(cr, deskV2Scale, deskV2Scale);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+        if (isTablet) {
+            drawDouniComicTablet(cr, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor,
+                                 glowBaseColor, eyeCol, ink, catLW, mouseBlend < 0.18);
+        } else {
+            drawDouniComicMouse(cr, mouseCenter, (double)physics.mousePressLeft.value, (double)physics.mousePressRight.value,
+                                mouseBodyColor, kbBevelColor, mouseWheelColor, glowBaseColor, ink, catLW, (double)physics.mousePressMiddle.value);
+        }
+
+        cairo_save(cr);
+        cairo_translate(cr, 582.0 + angerShakeX, 248.0 + headBobY);
+        cairo_rotate(cr, headTiltRad);
+        drawBeagleSprite(cr, atlas, SP_BODY, 14*SB, 92*SB, SB);
+        drawBeagleSprite(cr, atlas, SP_EAR_L, -74*SB, 12*SB, SB, earBob);
+        drawBeagleSprite(cr, atlas, SP_HEAD, 0, 0, SB);
+        drawFace(0, 0, SB, faceMode);
+        drawBeagleSprite(cr, atlas, SP_EAR_R, 86*SB, 22*SB, SB, -earBob);
         cairo_restore(cr);
-        if (physics.musicIntensity > 0.01f) drawMusicHeadphones(cr, { (float)hx, (float)hy }, physics, eyeTheme, skin);
+
+        drawDouniV2Keyboard(cr, physics, kbDeckColor, kbBevelColor, kbKeyColor, kbAccentColor, glowBaseColor,
+                            settings.keyboardMarquee, ink, kbLW, impY, impT);
+
+        PtD lTarget = { (double)physics.douniLeftKeyTarget.point().x + impT * 10.0, (double)physics.douniLeftKeyTarget.point().y + impY * 8.5 };
+        PtD leftToolTarget = isTablet
+            ? PtD{ v2Nib.x + 14.0, v2Nib.y - 12.0 + tabletPress * 5.0 }
+            : PtD{ mouseCenter.x + 10.0, mouseCenter.y - 2.0 + mousePress * 8.0 };
+        PtD lIdleSh = { 468.0, 344.0 }, lIdleTip = { 242.0, 346.0 };
+        PtD lSlamSh = { 468.0, 350.0 }, lSlamTip = lTarget;
+        PtD lHighSh = { 468.0, 302.0 }, lHighTip = { 258.0, 248.0 };
+        PtD lMouseSh = { 468.0, 326.0 }, lMouseTip = leftToolTarget;
+        double lTypT = std::clamp(std::fabs(leftPose), 0.0, 1.05);
+        PtD lTypSh = leftPose >= 0.0 ? lerpPtD(lIdleSh, lHighSh, lTypT) : lerpPtD(lIdleSh, lSlamSh, lTypT);
+        PtD lTypTip = leftPose >= 0.0 ? lerpPtD(lIdleTip, lHighTip, lTypT) : lerpPtD(lIdleTip, lSlamTip, lTypT);
+        PtD lSh = mouseBlend > 0.01 ? lerpPtD(lTypSh, lMouseSh, mouseBlend) : lTypSh;
+        PtD lTip = mouseBlend > 0.01 ? lerpPtD(lTypTip, lMouseTip, mouseBlend) : lTypTip;
+        drawBeagleV2Paw(lSh, lTip);
+
+        if (isTablet && mouseBlend > 0.18) {
+            double penAlpha = smoothstepD(0.18, 0.42, mouseBlend);
+            cairo_save(cr);
+            cairo_push_group(cr);
+            cairo_translate(cr, v2Nib.x, v2Nib.y + tabletPress * 4.0);
+            cairo_rotate(cr, -2.14 + (double)physics.tabletPenTilt.value);
+            drawDouniComicStylus(cr, 124.0, glowBaseColor, eyeCol, ink, catLW, tabletPress);
+            cairo_pop_group_to_source(cr);
+            cairo_paint_with_alpha(cr, penAlpha);
+            cairo_restore(cr);
+        }
+
+        PtD rTarget = { (double)physics.douniRightKeyTarget.point().x + impT * 10.0, (double)physics.douniRightKeyTarget.point().y + impY * 8.5 };
+        PtD rIdleSh = { 616.0, 374.0 }, rIdleTip = { 410.0, 368.0 };
+        PtD rSlamSh = { 604.0, 372.0 }, rSlamTip = rTarget;
+        PtD rHighSh = { 622.0, 356.0 }, rHighTip = { 422.0, 294.0 };
+        double rTypT = std::clamp(std::fabs(rightPose), 0.0, 1.05);
+        PtD rSh = rightPose >= 0.0 ? lerpPtD(rIdleSh, rHighSh, rTypT) : lerpPtD(rIdleSh, rSlamSh, rTypT);
+        PtD rTip = rightPose >= 0.0 ? lerpPtD(rIdleTip, rHighTip, rTypT) : lerpPtD(rIdleTip, rSlamTip, rTypT);
+        drawBeagleV2Paw(rSh, rTip);
+
+        cairo_restore(cr);
+        if (physics.musicIntensity > 0.01f) {
+            drawMusicHeadphones(cr, { (float)(deskTx + (582.0 + angerShakeX) * deskV2Scale), (float)(deskTy + (248.0 + headBobY) * deskV2Scale) }, physics, eyeTheme, skin);
+        }
     }
 
     static void drawDouniScene(cairo_t* cr, const CatPhysics& physics, const SkinSpec& skin,

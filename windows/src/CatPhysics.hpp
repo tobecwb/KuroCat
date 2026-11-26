@@ -730,7 +730,7 @@ public:
     }
 
     void step(float rawDt, const RECT& windowRect, InputEngine& engine, const CatSettings& settings,
-              bool douniTyping = false, bool douniSkin = false, bool isClassicBuiltIn = false) {
+              bool douniTyping = false, bool douniSkin = false, bool isClassicBuiltIn = false, bool beagleSkin = false) {
         float dt = std::min(rawDt, 1.0f / 25.0f);
         time += dt;
         engine.pollMouse(dt);
@@ -1074,11 +1074,13 @@ public:
             kbImpactTilt.value = 0.0f;
             kbSparkTimer = 0.0f;
         }
-        if (douniSkin) {
-            // Deliberate petting threshold (avoids abrupt hijacking on 1px cursor brush or fast hunting whip!) + silky Disney ease spring
-            bool wantsLoaf = !isScruffDragging_ && scruff < 0.08f && dizzy < 0.15f && hunt < 0.22f
-                && (petHeadIntensity > 0.30f || isCurrentlyPetting_ || petBodyIntensity > 0.35f || sleepiness > 0.48f);
-            douniLoafBlend.target = wantsLoaf ? 1.0f : 0.0f;
+        if (douniSkin || beagleSkin) {
+            // Deliberate petting threshold for Douni; Beagle stays at desk showing Pose 2 happy blush on pet and curls to Pose 4 on sleep
+            bool wantsLoaf = beagleSkin
+                ? (!isScruffDragging_ && scruff < 0.08f && (lie > 0.45f || sleepiness > 0.48f))
+                : (!isScruffDragging_ && scruff < 0.08f && dizzy < 0.15f && hunt < 0.22f
+                    && (petHeadIntensity > 0.30f || isCurrentlyPetting_ || petBodyIntensity > 0.35f || sleepiness > 0.48f));
+            douniLoafBlend.target = (!beagleSkin && wantsLoaf) ? 1.0f : 0.0f;
             douniLoafBlend.step(dt, 52.0f, 13.5f);
             bool typingNow = (douniSlapTimer > 0.04f || !activeKeys.empty());
             bool tabletUsed = isTabletActive && (engine.leftMouseDown || mouseActivelyUsed);

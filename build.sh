@@ -99,7 +99,7 @@ SWIFT_SOURCES=(
 
 COMMON_FLAGS=(
     -swift-version 5
-    -O
+    -Osize
     -framework AppKit
     -framework CoreGraphics
     -framework QuartzCore
@@ -119,6 +119,7 @@ swiftc "${COMMON_FLAGS[@]}" -target x86_64-apple-macos11.0 "${SWIFT_SOURCES[@]}"
 
 echo "==> Creating Universal binary (arm64 + x86_64)..."
 lipo -create "$TMP_BIN_DIR/${APP_NAME}_arm64" "$TMP_BIN_DIR/${APP_NAME}_x86_64" -output "$MACOS_DIR/$APP_NAME"
+strip -x "$MACOS_DIR/$APP_NAME"
 lipo -info "$MACOS_DIR/$APP_NAME"
 
 # Keep a consistent signing identity across builds so macOS can match privacy grants.

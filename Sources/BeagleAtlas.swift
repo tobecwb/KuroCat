@@ -35,7 +35,15 @@ enum BeagleAtlas {
         "nose": CGRect(x: 252, y: 287, width: 14, height: 10),
     ]
 
-    static let sprites: [String: CGImage] = {
+    private static var _sprites: [String: CGImage]?
+
+    static func purgeCache() {
+        _sprites = nil
+    }
+
+    static var sprites: [String: CGImage] {
+        if let cached = _sprites { return cached }
+        let decoded: [String: CGImage] = {
         let b64 = [
             "iVBORw0KGgoAAAANSUhEUgAABAAAAAFCCAMAAABYa19xAAAB/lBMVEVrV1jp2uRukaZcUU7/qqr+ysz+y8/+y8+KtM6dzeidOjnOw7QA////VVXPHiAaIyjB",
             "LC07TVkaeXsUm6DdsHWwAACbQkS8JSdbdoh9Pj5AMR66MTETe5csOUGNU09Uqp6gQj+rjWnMMzP/ssx/AH8Zk3iePkEzMzMAqtQAzJlrPz94Rj9nQkKqqqqA",
@@ -284,5 +292,8 @@ enum BeagleAtlas {
             if let sub = full.cropping(to: r) { out[k] = sub }
         }
         return out
-    }()
+        }()
+        _sprites = decoded
+        return decoded
+    }
 }
