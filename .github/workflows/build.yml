@@ -64,6 +64,9 @@ jobs:
       - name: Check covered eye pixels
         run: bash scripts/check-eye-closure.sh
 
+      - name: Check skin mapping parity across ports (shared/rig.json)
+        run: bash scripts/check-rig.sh
+
       # macOS remembers Input Monitoring permission by code signature. Signing every release with the
       # same certificate (created once by scripts/create-macos-signing-cert.sh) keeps the permission
       # across updates; ad-hoc builds force users to re-grant it after every update.

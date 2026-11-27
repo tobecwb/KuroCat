@@ -39,7 +39,7 @@ static inline const char* tr(const char* zh, const char* en, const char* pt) { r
 #include <fcntl.h>
 #include <glib-unix.h>
 
-#define KUROCAT_VERSION_STR "1.5.2"
+#define KUROCAT_VERSION_STR "1.5.4"
 static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
@@ -124,6 +124,7 @@ struct LinuxApp {
     double lastDragRootX = 0.0;
     double lastDragRootY = 0.0;
     int dragStartWinX = 0, dragStartWinY = 0;
+    double dragScruffDeltaX = 0.0, dragScruffDeltaY = 0.0;
     bool hasSavedObsPos = false;
     int savedObsPosX = 0, savedObsPosY = 0;
 
@@ -142,6 +143,8 @@ struct LinuxApp {
     std::string availableUpdateVersion;
     std::string availableUpdateUrl;
     bool isUpdating = false;
+    bool isCheckingUpdates = false;
+    bool pendingManualUpdateCheck = false;
 
     // Cached window geometry (updated from configure-event). Querying it from the X server every
     // frame cost several synchronous round-trips per frame.
@@ -633,6 +636,14 @@ static std::string fetchUrlBody(const char* url) {
 static void startInAppUpdate();
 
 [[maybe_unused]] static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
+    if (g_app) {
+        if (g_app->isCheckingUpdates) {
+            if (manual) g_app->pendingManualUpdateCheck = true;
+            return;
+        }
+        g_app->isCheckingUpdates = true;
+        g_app->pendingManualUpdateCheck = manual;
+    }
     std::thread([manual, delayMs]() {
         if (delayMs > 0) usleep((useconds_t)delayMs * 1000);
         auto* res = new LinuxUpdateResult();
@@ -656,10 +667,16 @@ static void startInAppUpdate();
 
         g_idle_add(+[](gpointer data) -> gboolean {
             auto* r = static_cast<LinuxUpdateResult*>(data);
+            bool isManual = r->manual;
+            if (g_app) {
+                isManual = isManual || g_app->pendingManualUpdateCheck;
+                g_app->isCheckingUpdates = false;
+                g_app->pendingManualUpdateCheck = false;
+            }
             if (g_app && r->ok && r->hasUpdate) {
                 g_app->availableUpdateVersion = r->latestTag;
                 g_app->availableUpdateUrl = r->releaseUrl;
-                if (!r->manual && g_app->settings.suppressAutoUpdatePrompt) {
+                if (!isManual && g_app->settings.suppressAutoUpdatePrompt) {
                     delete r;
                     return G_SOURCE_REMOVE;
                 }
@@ -681,11 +698,11 @@ static void startInAppUpdate();
                     g_app->settings.suppressAutoUpdatePrompt = false;
                     g_app->settings.save();
                     startInAppUpdate();
-                } else {
+                } else if (resp == GTK_RESPONSE_NO) {
                     g_app->settings.suppressAutoUpdatePrompt = true;
                     g_app->settings.save();
                 }
-            } else if (r->manual) {
+            } else if (isManual) {
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL,
                     r->ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
@@ -807,7 +824,19 @@ static void startInAppUpdate() {
                     execl(p->second.c_str(), p->second.c_str(), nullptr);
                     _exit(127);
                 }
-                gtk_main_quit();
+                if (pid > 0) {
+                    gtk_main_quit();
+                } else {
+                    acquireSingleInstance();
+                    GtkWidget* dlg = gtk_message_dialog_new(
+                        nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+                        "重启失败");
+                    gtk_message_dialog_format_secondary_text(
+                        GTK_MESSAGE_DIALOG(dlg),
+                        "新版本已安装到 %s，请手动重启 KuroCat。", p->second.c_str());
+                    gtk_dialog_run(GTK_DIALOG(dlg));
+                    gtk_widget_destroy(dlg);
+                }
             } else {
                 GtkWidget* dlg = gtk_message_dialog_new(
                     nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO,
@@ -1620,21 +1649,50 @@ static void showSettingsWindow() {
     }
 
     GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_widget_set_name(win, "kuro-settings-win");
     gtk_window_set_title(GTK_WINDOW(win), tr("KuroCat 设置", "KuroCat Settings", "Configurações do KuroCat"));
-    int defW = 500, defH = 620;
+    int defW = 520, defH = 548;
     GdkRectangle wa = { 0, 0, 1280, 800 };
     if (GdkDisplay* dpy = gdk_display_get_default()) {
         GdkMonitor* mon = gdk_display_get_primary_monitor(dpy);
         if (!mon) mon = gdk_display_get_monitor(dpy, 0);
         if (mon) {
             gdk_monitor_get_workarea(mon, &wa);
-            defW = std::min(500, std::max(340, wa.width - 40));
-            defH = std::min(620, std::max(340, wa.height - 72));
+            defW = std::min(520, std::max(360, wa.width - 40));
+            defH = std::min(548, std::max(380, wa.height - 72));
         }
     }
     gtk_window_set_default_size(GTK_WINDOW(win), defW, defH);
     gtk_window_move(GTK_WINDOW(win), wa.x + std::max(0, (wa.width - defW) / 2), wa.y + std::max(12, (wa.height - defH) / 2));
     app.settingsWindow = win;
+
+    // Scoped Pure-White Minimal Operate CSS (matches macOS & Windows 1:1, never affects transparent pet window)
+    static bool cssInstalled = false;
+    if (!cssInstalled) {
+        cssInstalled = true;
+        GtkCssProvider* css = gtk_css_provider_new();
+        const char* kSettingsCss =
+            "#kuro-settings-win { background-color: #ffffff; color: #131316; }\n"
+            "#kuro-settings-win .kuro-title { font-size: 16px; font-weight: 600; color: #131316; }\n"
+            "#kuro-settings-win .kuro-sub { font-size: 11px; color: #6e6e73; }\n"
+            "#kuro-settings-win .kuro-ver { background: #f4f4f6; color: #6e6e73; border-radius: 6px; padding: 2px 8px; font-size: 11px; }\n"
+            "#kuro-settings-win stackswitcher { background: #f4f4f6; border-radius: 9px; padding: 3px; }\n"
+            "#kuro-settings-win stackswitcher button { background: transparent; border: none; box-shadow: none; color: #6e6e73; border-radius: 6px; padding: 5px 12px; font-weight: 500; }\n"
+            "#kuro-settings-win stackswitcher button:checked { background: #ffffff; color: #131316; border: 1px solid #e6e6eb; box-shadow: 0 1px 2px rgba(0,0,0,0.06); font-weight: 600; }\n"
+            "#kuro-settings-win .kuro-card { background: #ffffff; border: 1px solid #e6e6eb; border-radius: 10px; padding: 14px; }\n"
+            "#kuro-settings-win button { background: #ffffff; border: 1px solid #e6e6eb; border-radius: 7px; color: #131316; padding: 4px 10px; box-shadow: none; }\n"
+            "#kuro-settings-win button:hover { background: #f4f4f6; }\n"
+            "#kuro-settings-win button.kuro-primary { background: #18181b; border-color: #18181b; color: #ffffff; font-weight: 500; }\n"
+            "#kuro-settings-win button.kuro-primary:hover { background: #323237; }\n"
+            "#kuro-settings-win button.kuro-danger { background: #ffffff; border-color: rgba(220,38,38,0.35); color: #dc2626; }\n"
+            "#kuro-settings-win button.kuro-danger:hover { background: #fef2f2; }\n"
+            "#kuro-settings-win separator { background-color: #f0f0f3; min-height: 1px; }\n";
+        gtk_css_provider_load_from_data(css, kSettingsCss, -1, nullptr);
+        if (GdkScreen* scr = gdk_screen_get_default()) {
+            gtk_style_context_add_provider_for_screen(scr, GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+        g_object_unref(css);
+    }
 
     g_signal_connect(win, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {
         g_app->settingsWindow = nullptr;
@@ -1646,22 +1704,53 @@ static void showSettingsWindow() {
         g_app->setAutostartChk = g_app->setHighFpsChk = g_app->setObsCombo = g_app->setObsHideChk = g_app->setLangCombo = nullptr;
     }), nullptr);
 
+    GtkWidget* outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(outer), 18);
+    gtk_container_add(GTK_CONTAINER(win), outer);
+
+    // Minimal Typographic Header (no logo, no emoji)
+    GtkWidget* headerRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* headerLeft = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget* titleLbl = gtk_label_new(tr("KuroCat 设置", "KuroCat Settings", "Configurações do KuroCat"));
+    gtk_widget_set_halign(titleLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(titleLbl), "kuro-title");
+    std::string activeSkinName = activeSkin(app).name;
+    std::string subStr = std::string(tr("当前皮肤：", "Active: ", "Em uso: ")) + activeSkinName;
+    GtkWidget* subLbl = gtk_label_new(subStr.c_str());
+    gtk_widget_set_halign(subLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(subLbl), "kuro-sub");
+    gtk_box_pack_start(GTK_BOX(headerLeft), titleLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(headerLeft), subLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(headerRow), headerLeft, TRUE, TRUE, 0);
+
+    std::string verStr = std::string("v") + APP_VERSION;
+    GtkWidget* verLbl = gtk_label_new(verStr.c_str());
+    gtk_widget_set_valign(verLbl, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(verLbl), "kuro-ver");
+    gtk_box_pack_end(GTK_BOX(headerRow), verLbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), headerRow, FALSE, FALSE, 0);
+
+    // 3-Tab Stack Switcher
+    GtkWidget* stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    GtkWidget* switcher = gtk_stack_switcher_new();
+    gtk_stack_switcher_set_stack(GTK_STACK_SWITCHER(switcher), GTK_STACK(stack));
+    gtk_box_set_homogeneous(GTK_BOX(switcher), TRUE);
+    gtk_box_pack_start(GTK_BOX(outer), switcher, FALSE, FALSE, 0);
+
     GtkWidget* scroller = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_container_add(GTK_CONTAINER(win), scroller);
+    gtk_container_add(GTK_CONTAINER(scroller), stack);
+    gtk_box_pack_start(GTK_BOX(outer), scroller, TRUE, TRUE, 0);
 
-    GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_container_set_border_width(GTK_CONTAINER(root), 14);
-    gtk_container_add(GTK_CONTAINER(scroller), root);
-
-    auto makeSection = [&](const char* title) -> GtkWidget* {
-        GtkWidget* frame = gtk_frame_new(title);
+    auto makeTabGrid = [&](const char* name, const char* title) -> GtkWidget* {
+        GtkWidget* wrap = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         GtkWidget* grid = gtk_grid_new();
-        gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
-        gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+        gtk_style_context_add_class(gtk_widget_get_style_context(grid), "kuro-card");
+        gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
         gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
-        gtk_container_add(GTK_CONTAINER(frame), grid);
-        gtk_box_pack_start(GTK_BOX(root), frame, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(wrap), grid, FALSE, FALSE, 0);
+        gtk_stack_add_titled(GTK_STACK(stack), wrap, name, title);
         return grid;
     };
     auto leftLabel = [](const char* txt) -> GtkWidget* {
@@ -1670,9 +1759,9 @@ static void showSettingsWindow() {
         return l;
     };
 
-    // Section 1: Appearance & Orientation
+    // Tab 1: Appearance
     {
-        GtkWidget* g = makeSection(tr("外观与方向", "Appearance & Orientation", "Aparência e orientação"));
+        GtkWidget* g = makeTabGrid("appearance", tr("外观", "Appearance", "Aparência"));
         int r = 0;
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("猫咪皮肤", "Cat Skin", "Skin do gato")), 0, r, 1, 1);
@@ -1701,20 +1790,13 @@ static void showSettingsWindow() {
             refreshSettingsWindow(*g_app);
         }), nullptr);
         gtk_grid_attach(GTK_GRID(g), app.setCoatCombo, 1, r, 1, 1);
-        GtkWidget* coatActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-        GtkWidget* dressBtn = gtk_button_new_with_label(tr("换装间…", "Wardrobe…", "Provador…"));
-        g_signal_connect(dressBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { showDressingRoom(); }), nullptr);
+        GtkWidget* coatActions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         app.setDeleteSkinBtn = gtk_button_new_with_label(tr("删除", "Delete", "Excluir"));
+        gtk_style_context_add_class(gtk_widget_get_style_context(app.setDeleteSkinBtn), "kuro-danger");
         g_signal_connect(app.setDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
             if (!g_app->settings.customSkin.empty()) confirmDeleteSkin(g_app->settings.customSkin);
         }), nullptr);
-        app.setBatchDeleteSkinBtn = gtk_button_new_with_label(tr("批量删除…", "Batch…", "Várias…"));
-        g_signal_connect(app.setBatchDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
-            confirmBatchDeleteSkins();
-        }), nullptr);
-        gtk_box_pack_start(GTK_BOX(coatActions), dressBtn, TRUE, TRUE, 0);
         gtk_box_pack_start(GTK_BOX(coatActions), app.setDeleteSkinBtn, FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(coatActions), app.setBatchDeleteSkinBtn, FALSE, FALSE, 0);
         gtk_grid_attach(GTK_GRID(g), coatActions, 2, r++, 1, 1);
 
         gtk_grid_attach(GTK_GRID(g), leftLabel(tr("皮肤目录", "Skins Dir", "Pasta")), 0, r, 1, 1);
@@ -1896,9 +1978,9 @@ static void showSettingsWindow() {
         gtk_grid_attach(GTK_GRID(g), optRow, 0, r++, 3, 1);
     }
 
-    // Section 2: Interaction & Effects
+    // Tab 2: Interaction
     {
-        GtkWidget* g = makeSection(tr("互动与特效", "Interaction & Effects", "Interação e efeitos"));
+        GtkWidget* g = makeTabGrid("interaction", tr("互动", "Interaction", "Interação"));
         int r = 0;
 
         app.setDragAnimChk = gtk_check_button_new_with_label(tr("拎起拖拽动画", "Scruff-Drag Lift Animation", "Animação de erguer ao arrastar"));
@@ -2001,9 +2083,9 @@ static void showSettingsWindow() {
         gtk_grid_attach(GTK_GRID(g), app.setTabletCombo, 1, r++, 2, 1);
     }
 
-    // Section 3: Window & System
+    // Tab 3: System
     {
-        GtkWidget* g = makeSection(tr("窗口与系统", "Window & System", "Janela e sistema"));
+        GtkWidget* g = makeTabGrid("system", tr("系统", "System", "Sistema"));
         int r = 0;
 
         app.setTopmostChk = gtk_check_button_new_with_label(tr("窗口置顶显示", "Always On Top", "Sempre visível"));
@@ -2129,6 +2211,23 @@ static void showSettingsWindow() {
         gtk_box_pack_start(GTK_BOX(dirsBox), kDirBtn, TRUE, TRUE, 0);
         gtk_grid_attach(GTK_GRID(g), dirsBox, 2, r++, 1, 1);
     }
+
+    // Clean Bottom Action Bar (matches macOS & Windows 1:1, no emoji)
+    GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(outer), sep, FALSE, FALSE, 2);
+    GtkWidget* footerRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    app.setBatchDeleteSkinBtn = gtk_button_new_with_label(tr("批量删除皮肤", "Batch Delete", "Excluir várias"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(app.setBatchDeleteSkinBtn), "kuro-danger");
+    g_signal_connect(app.setBatchDeleteSkinBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+        confirmBatchDeleteSkins();
+    }), nullptr);
+    gtk_box_pack_start(GTK_BOX(footerRow), app.setBatchDeleteSkinBtn, FALSE, FALSE, 0);
+
+    GtkWidget* importBtn = gtk_button_new_with_label(tr("导入皮肤…", "Import Skin…", "Importar skin…"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(importBtn), "kuro-primary");
+    g_signal_connect(importBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { showDressingRoom(); }), nullptr);
+    gtk_box_pack_end(GTK_BOX(footerRow), importBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), footerRow, FALSE, FALSE, 0);
 
     refreshSettingsWindow(app);
     gtk_widget_show_all(win);
@@ -2274,6 +2373,10 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
                 startInAppUpdate();
             }));
         }
+    } else if (app.isCheckingUpdates) {
+        GtkWidget* item = gtk_menu_item_new_with_label(tr("⏳ 正在检查更新...", "⏳ Checking for Updates...", "⏳ Verificando atualizações..."));
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
     } else {
         std::string lbl = std::string(tr("检查更新 (当前 v", "Check for Updates (v", "Verificar atualizações (v")) + APP_VERSION + ")";
         addAction(lbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {
@@ -2384,6 +2487,17 @@ static gboolean onButtonPress(GtkWidget*, GdkEventButton* evt, gpointer) {
         g_app->lastDragRootX = evt->x_root;
         g_app->lastDragRootY = evt->y_root;
         gtk_window_get_position(GTK_WINDOW(g_app->window), &g_app->dragStartWinX, &g_app->dragStartWinY);
+        if (g_app->settings.enableDragAnimation) {
+            int ww = 0, wh = 0;
+            gtk_window_get_size(GTK_WINDOW(g_app->window), &ww, &wh);
+            Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*g_app), g_app->settings.flipHorizontal, g_app->settings.rotationDeg);
+            double sc = (double)std::max(1, ww) / (double)CatPhysics::CanvasWidth;
+            g_app->dragScruffDeltaX = evt->x_root - (double)pinch.x * sc - (double)g_app->dragStartWinX;
+            g_app->dragScruffDeltaY = evt->y_root - (double)pinch.y * sc - (double)g_app->dragStartWinY;
+        } else {
+            g_app->dragScruffDeltaX = 0.0;
+            g_app->dragScruffDeltaY = 0.0;
+        }
         g_app->physics.setDragging(g_app->settings.enableDragAnimation, 0.0f, 0.0f);
         return TRUE;
     }
@@ -2431,8 +2545,10 @@ static gboolean onMotionNotify(GtkWidget*, GdkEventMotion* evt, gpointer) {
         return TRUE;
     }
     if (g_app->isDragging) {
-        int nx = g_app->dragStartWinX + (int)std::round(evt->x_root - g_app->dragStartRootX);
-        int ny = g_app->dragStartWinY + (int)std::round(evt->y_root - g_app->dragStartRootY);
+        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
+        double ease = t * t * (3.0 - 2.0 * t);
+        int nx = g_app->dragStartWinX + (int)std::round((evt->x_root - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
+        int ny = g_app->dragStartWinY + (int)std::round((evt->y_root - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
         float dx = (float)(evt->x_root - g_app->lastDragRootX);
         float dy = (float)(evt->y_root - g_app->lastDragRootY);
         g_app->lastDragRootX = evt->x_root;
@@ -2856,6 +2972,15 @@ static gboolean onFrameTick(gpointer) {
         g_app->physics.step(dt / (float)substeps, (float)winX, (float)winY, (float)winW,
                             g_app->input, g_app->settings, curSkin.typingStyle, curSkin.renderStyle, isClassicBuiltIn);
     }
+    if (g_app->isDragging && (std::fabs(g_app->dragScruffDeltaX) > 0.5 || std::fabs(g_app->dragScruffDeltaY) > 0.5)) {
+        double t = std::clamp((double)g_app->physics.scruffDrag.value, 0.0, 1.0);
+        double ease = t * t * (3.0 - 2.0 * t);
+        int nx = g_app->dragStartWinX + (int)std::round((g_app->lastDragRootX - g_app->dragStartRootX) + g_app->dragScruffDeltaX * ease);
+        int ny = g_app->dragStartWinY + (int)std::round((g_app->lastDragRootY - g_app->dragStartRootY) + g_app->dragScruffDeltaY * ease);
+        if (nx != winX || ny != winY) {
+            gtk_window_move(GTK_WINDOW(g_app->window), nx, ny);
+        }
+    }
 
     // Idle dirty-check: skip gtk_widget_queue_draw when completely static to achieve 0fps idle redraw.
     struct RenderedPoseSnapshot {
@@ -2982,6 +3107,7 @@ static gboolean onWakeSignal(gpointer) {
 }
 
 int main(int argc, char** argv) {
+    SkinSpec::appVersion = APP_VERSION; // skins carrying a newer minAppVersion are refused with an upgrade hint
     if (argc > 1 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
         std::printf("KuroCat %s\n", APP_VERSION);
         return 0;

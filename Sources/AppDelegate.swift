@@ -50,8 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var availableUpdateURL: URL?
     private var availableAssetURL: URL?
     private var isUpdating = false
+    private var isCheckingUpdates = false
+    private var pendingManualUpdateCheck = false
     private var isHandingOverToNewerCopy = false
-    private var isPresentingModalAlert = false
+    private var modalAlertDepth = 0
+    private var isPresentingModalAlert: Bool { modalAlertDepth > 0 }
     private var dressingRoom: DressingRoomWindowController?
     private var settingsWindow: SettingsWindowController?
     private var skinManagerWindow: SkinBatchDeleteWindowController?
@@ -108,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engine.start()
 
         setupStatusItem()
+        updateStatusItemToolTip()
         if isAutoStartEnabled() {
             // Keep LaunchAgent path updated if user moved KuroCat.app into /Applications
             _ = setAutoStartEnabled(true)
@@ -130,6 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         InputEngine.shared.flushStats()
         InputEngine.shared.stop()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     // MARK: - One KuroCat at a time (newest copy wins)
@@ -655,12 +663,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateItem.isEnabled = !isUpdating
             menu.addItem(updateItem)
         } else {
+            let checkTitle = isCheckingUpdates
+                ? tr("⏳ 正在检查更新...", "⏳ Checking for Updates...", "⏳ Verificando atualizações...")
+                : tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))", "Verificar atualizações (v\(currentAppVersion))")
             let checkItem = NSMenuItem(
-                title: tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))", "Verificar atualizações (v\(currentAppVersion))"),
+                title: checkTitle,
                 action: #selector(manualCheckForUpdates),
                 keyEquivalent: ""
             )
             checkItem.target = self
+            checkItem.isEnabled = !isCheckingUpdates
             menu.addItem(checkItem)
         }
 
@@ -759,7 +771,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let token {
                 NotificationCenter.default.removeObserver(token)
             }
-            clear()
+            DispatchQueue.main.async {
+                clear()
+            }
         }
     }
 
@@ -793,16 +807,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         InputEngine.shared.requestPermissionsAndOpenSettings()
     }
 
+    private func updateStatusItemToolTip() {
+        guard let button = statusItem?.button else { return }
+        if isPetVisible {
+            button.toolTip = loc("KuroCat 黑猫键盘桌宠", "KuroCat Desktop Pet", "KuroCat – gatinho de mesa")
+        } else {
+            button.toolTip = loc("KuroCat 黑猫键盘桌宠（已隐藏 · 点击菜单「显示桌宠」唤回）", "KuroCat (Hidden — Click to Show Pet)", "KuroCat (oculto — clique para mostrar o gato)")
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !isPetVisible {
+            toggleVisibility()
+        }
+        return true
+    }
+
     @objc private func toggleVisibility() {
         isPetVisible.toggle()
+        statusItem?.isVisible = true
         if isPetVisible {
+            hiddenByFullscreen = false
             lastFrameTime = CACurrentMediaTime()
+            overlayWindow.applyWindowLevelAndBehavior()
             overlayWindow.orderFrontRegardless()
             wakeToActive(immediateRedraw: true)
+            syncWindowTopmost()
         } else {
             configureRenderTimer(for: .paused)
             overlayWindow.orderOut(nil)
         }
+        updateStatusItemToolTip()
     }
 
     @objc private func selectTabletMode(_ sender: NSMenuItem) {
@@ -876,19 +911,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func runWithOverlayYielding<T>(_ body: () -> T) -> T {
-        isPresentingModalAlert = true
-        overlayWindow?.catView.forceClickThroughForModal = true
-        let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
-        if let overlayWindow, !obsBg {
-            overlayWindow.level = .floating
-            overlayWindow.ignoresMouseEvents = true
+        let wasPresenting = modalAlertDepth > 0
+        modalAlertDepth += 1
+        if !wasPresenting {
+            overlayWindow?.catView.forceClickThroughForModal = true
+            let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
+            if let overlayWindow, !obsBg {
+                overlayWindow.level = .floating
+                overlayWindow.ignoresMouseEvents = true
+            }
         }
         defer {
-            isPresentingModalAlert = false
-            overlayWindow?.catView.forceClickThroughForModal = false
-            if let overlayWindow, !obsBg {
-                overlayWindow.applyWindowLevelAndBehavior()
-                syncWindowTopmost()
+            modalAlertDepth = max(0, modalAlertDepth - 1)
+            if modalAlertDepth == 0 {
+                overlayWindow?.catView.forceClickThroughForModal = false
+                let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
+                if let overlayWindow, !obsBg {
+                    overlayWindow.applyWindowLevelAndBehavior()
+                    syncWindowTopmost()
+                }
             }
         }
         return body()
@@ -1034,6 +1075,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         CatSettings.shared.language = code
+        updateStatusItemToolTip()
         wakeToActive(immediateRedraw: true)
     }
 
@@ -1486,24 +1528,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func checkForUpdates(manual: Bool) {
-        fetchUpdateEndpoint(Self.updateVersionJSONURLString) { [weak self] primary in
-            guard let self else { return }
-            if let info = primary {
-                DispatchQueue.main.async { self.handleUpdateResult(info, manual: manual) }
-                return
-            }
-            self.fetchUpdateEndpoint(Self.updatePageURLString) { [weak self] fallback in
+        if isCheckingUpdates {
+            if manual { pendingManualUpdateCheck = true }
+            return
+        }
+        isCheckingUpdates = true
+        pendingManualUpdateCheck = manual
+
+        func finish(_ info: (tag: String, pageURL: URL?, assetURL: URL?)?) {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                DispatchQueue.main.async {
-                    if let info = fallback {
-                        self.handleUpdateResult(info, manual: manual)
-                    } else if manual {
-                        self.showInfoAlert(title: loc("检查更新失败", "Update Check Failed", "Falha ao verificar atualizações"),
+                let effectiveManual = manual || self.pendingManualUpdateCheck
+                self.isCheckingUpdates = false
+                self.pendingManualUpdateCheck = false
+                if let info {
+                    self.handleUpdateResult(info, manual: effectiveManual)
+                } else if effectiveManual {
+                    self.showInfoAlert(title: loc("检查更新失败", "Update Check Failed", "Falha ao verificar atualizações"),
                                        message: loc("无法连接到更新服务器，请稍后重试或检查网络连接。",
                                                     "Couldn't reach the update server. Try again later or check your connection.",
                                                     "Não foi possível conectar ao servidor de atualizações. Tente mais tarde ou verifique sua conexão."))
-                    }
                 }
+            }
+        }
+
+        fetchUpdateEndpoint(Self.updateVersionJSONURLString) { [weak self] primary in
+            guard let self else { return }
+            if let info = primary {
+                finish(info)
+                return
+            }
+            self.fetchUpdateEndpoint(Self.updatePageURLString) { [weak self] fallback in
+                guard self != nil else { return }
+                finish(fallback)
             }
         }
     }
@@ -1520,7 +1577,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ) {
         let ctrl = updatePromptController ?? UpdatePromptWindowController()
         if updatePromptController == nil {
-            releaseOnClose(ctrl.window) { [weak self] in self?.updatePromptController = nil }
+            releaseOnClose(ctrl.window) { [weak self, weak ctrl] in
+                if let ctrl, self?.updatePromptController === ctrl {
+                    self?.updatePromptController = nil
+                }
+            }
         }
         updatePromptController = ctrl
         ctrl.configure(
@@ -1718,6 +1779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             open -n \(dst)
         else
             mv \(dst).bak \(dst) 2>/dev/null
+            open -n \(dst) 2>/dev/null
         fi
         rm -rf \(tmp)
         """
@@ -1853,7 +1915,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 /// Non-modal update prompt kept strictly above the overlay window so buttons stay clickable
 /// and right-click context menus / quitting remain completely responsive.
-private final class UpdatePromptWindowController: NSWindowController {
+private final class UpdatePromptWindowController: NSWindowController, NSWindowDelegate {
     private var primaryAction: (() -> Void)?
     private var secondaryAction: (() -> Void)?
     private var cancelAction: (() -> Void)?
@@ -1872,6 +1934,7 @@ private final class UpdatePromptWindowController: NSWindowController {
         win.title = loc("KuroCat 更新提醒", "KuroCat Update", "Atualização do KuroCat")
         win.isReleasedWhenClosed = false
         super.init(window: win)
+        win.delegate = self
         syncWindowLevel()
     }
 
@@ -1964,18 +2027,34 @@ private final class UpdatePromptWindowController: NSWindowController {
         window?.orderFrontRegardless()
     }
 
+    private func clearActions() {
+        primaryAction = nil
+        secondaryAction = nil
+        cancelAction = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        clearActions()
+    }
+
     @objc private func handlePrimary() {
-        window?.orderOut(nil)
-        primaryAction?()
+        let action = primaryAction
+        clearActions()
+        window?.close()
+        action?()
     }
 
     @objc private func handleSecondary() {
-        window?.orderOut(nil)
-        secondaryAction?()
+        let action = secondaryAction
+        clearActions()
+        window?.close()
+        action?()
     }
 
     @objc private func handleCancel() {
-        window?.orderOut(nil)
-        cancelAction?()
+        let action = cancelAction
+        clearActions()
+        window?.close()
+        action?()
     }
 }

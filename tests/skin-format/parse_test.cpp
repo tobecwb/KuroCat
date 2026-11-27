@@ -47,7 +47,7 @@ int main() {
     rejects("[1,2]", "JSON 对象");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},})", "JSON");
     rejects(R"({"name":"x","palette":{"body":"#000000"}})", "formatVersion");
-    rejects(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"}})", "升级");
+    rejects(R"({"formatVersion":3,"name":"x","palette":{"body":"#000000"}})", "升级");
     rejects(R"({"formatVersion":1.5,"name":"x","palette":{"body":"#000000"}})", "整数");
     rejects(R"({"formatVersion":1,"palette":{"body":"#000000"}})", "name");
     rejects(R"({"formatVersion":1,"name":"   ","palette":{"body":"#000000"}})", "不能为空");
@@ -110,6 +110,29 @@ int main() {
     CHECK(std::fabs(ext.shape.hindLegRootX - (-6.0f)) < 1e-4f && std::fabs(ext.shape.hindLegRootY - 4.0f) < 1e-4f && std::fabs(ext.shape.hindLegWidth - 1.25f) < 1e-4f && std::fabs(ext.shape.hindLegReach - 1.15f) < 1e-4f, "hindLeg shape params");
     CHECK(ext.partGradients.count("body") == 1 && ext.partGradients["body"].set && std::fabs(ext.partGradients["body"].stop - 0.35f) < 1e-4f, "partGradients.stop parsed");
     CHECK(ext.partGradients.count("head") == 1 && std::fabs(ext.partGradients["head"].stop - 0.1f) < 1e-4f, "partGradients.stop clamped");
+
+    // formatVersion 2 + minAppVersion (workshop writes 2 when a skin needs an app newer than 1.5.2)
+    accepts(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"}})");
+    accepts(R"({"formatVersion":1,"name":"x","minAppVersion":"9.9.9","palette":{"body":"#000000"}})"); // no app version set: not checked
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":153,"palette":{"body":"#000000"}})", "minAppVersion");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"1..5","palette":{"body":"#000000"}})", "minAppVersion");
+    SkinSpec::appVersion = "1.5.3";
+    accepts(R"({"formatVersion":2,"name":"x","minAppVersion":"1.5.3","palette":{"body":"#000000"}})");
+    accepts(R"({"formatVersion":2,"name":"x","minAppVersion":"1.4.10","palette":{"body":"#000000"}})");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"1.5.10","palette":{"body":"#000000"}})", "1.5.10");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"2.0","palette":{"body":"#000000"}})", "请先升级");
+    SkinSpec::appVersion.clear();
+    CHECK(SkinSpec::compareVersions("1.4.10", "1.4.9") == 1 && SkinSpec::compareVersions("1.5", "1.5.0") == 0 && SkinSpec::compareVersions("1.5.2", "1.5.3") == -1, "compareVersions");
+    { // marks limit: 1024 since 1.5.3 (256 before)
+        auto withMarks = [](int n) {
+            std::string j = R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"marks":[)";
+            for (int i = 0; i < n; ++i) j += std::string(i ? "," : "") + R"({"space":"head","kind":"stroke","color":"#FFFFFF","points":[[0,0],[1,1]]})";
+            return j + "]}";
+        };
+        SkinSpec many = accepts(withMarks(1024));
+        CHECK(many.marks.size() == 1024, "1024 marks accepted");
+        rejects(withMarks(1025), "1024");
+    }
 
     if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
     std::printf("PASS: .kurocat parser — templates/sample load, 28 malformed inputs rejected in Chinese, clamping/defaults/escapes/stickers OK\n");

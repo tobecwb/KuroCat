@@ -140,6 +140,32 @@ enum CatRenderer {
         return CGPoint(x: x, y: y)
     }
 
+    /// Inverse of `canvasPointToCatSpace`, returning the lifted scruff-pinch anchor in 360x320 canvas coordinates.
+    static func scruffPinchCanvasPoint(skin: SkinSpec, flipped: Bool, rotationDeg: CGFloat) -> CGPoint {
+        var x: CGFloat = 180.0
+        var y: CGFloat
+        if skin.renderStyle == .beagle {
+            y = 58.0
+        } else {
+            let hs = skin.shape.headScale
+            let bd = build(skin)
+            y = 82.0 + (hs - 1.0) * 6.0 + bd.crownBaseY * hs - 6.2 * hs
+        }
+        if flipped {
+            x = CatPhysics.canvasSize.width - x
+        }
+        if abs(rotationDeg) > 0.05 {
+            let rad = rotationDeg * .pi / 180.0
+            let fitScale = 1.0 - abs(sin(rad)) * 0.14
+            let dx = (x - 180.0) * fitScale
+            let dy = (y - 160.0) * fitScale
+            let c = cos(rad), s = sin(rad)
+            x = 180.0 + dx * c - dy * s
+            y = 160.0 + dx * s + dy * c
+        }
+        return CGPoint(x: x, y: y)
+    }
+
     /// Edit-mode hit test in unflipped 360x320 canvas coordinates:
     /// 0..3 = corner resize handles, 20 = top rotation/direction handle, 12 = inside edit box, -1 = outside.
     static func hitTestEditOverlay(point p: CGPoint) -> Int {
@@ -315,7 +341,7 @@ enum CatRenderer {
         let settings = CatSettings.shared
         let flipped = isPreview ? false : settings.flipHorizontal
         let rotationDeg: CGFloat = isPreview ? 0.0 : settings.rotationDeg
-        let showEdit = !isPreview && settings.isEditMode
+        let showEdit = !isPreview && settings.isEditMode && !seatedOnlyPass
         if showEdit {
             drawEditOverlay(in: ctx, isEnglish: settings.isEnglish, scale: settings.scale, rotationDeg: rotationDeg, flipped: flipped)
         }
@@ -340,6 +366,9 @@ enum CatRenderer {
     }
 
     /// Main 60fps draw routine in flipped 360x320 logical coordinate space.
+    /// True while draw() re-enters itself to paint the seated pose underneath a fading scruff-lift pose.
+    private static var seatedOnlyPass = false
+
     static func draw(in ctx: CGContext, physics: CatPhysics, showPermissionPill: Bool,
                      permissionPillText: String = "点击开启全局/游戏键盘监听 🔑",
                      isPreview: Bool = false) {
@@ -627,7 +656,7 @@ enum CatRenderer {
         }
 
         // 8. Floating Mechanical Keycap Badges (keyboard + mouse clicks)
-        if !physics.floatingKeycaps.isEmpty {
+        if !physics.floatingKeycaps.isEmpty && !seatedOnlyPass {
             drawFloatingKeycaps(in: ctx, physics: physics, flipped: flipped)
         }
 
@@ -723,7 +752,7 @@ enum CatRenderer {
         let headLift: CGFloat = build(skin).headLift
         let scruff = max(0, min(1, physics.scruffDrag.value))
         return CGPoint(
-            x: CatPhysics.seatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36 + physics.headYaw.value * 7.5,
+            x: CatPhysics.seatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36 + physics.headYaw.value * KuroRig.headShiftPerYaw,
             y: 126 + headLift + physics.headOffsetY.value + physics.headPitch.value * 4.8 + physics.breathingOffset * 1.1 - scruff * 22.0
         )
     }
@@ -1231,6 +1260,7 @@ enum CatRenderer {
         let style: KeyboardStyle
         let glowColor: RGBAColor
         let steps: Int
+        let mode: KeyboardMarqueeMode
     }
 
     // Keep only the currently displayed keyboard. Retina scale can change when the window moves screens.
@@ -1263,47 +1293,26 @@ enum CatRenderer {
         }
 
         let glowRGBA = RGBAColor(glowBaseColor)
-        if marquee {
+        let marqueeMode = physics.effectiveMarqueeMode
+        if marquee && physics.keyGlow.isEmpty {
             let asleep = physics.sleepiness >= 0.95
             let steps = marqueeSteps(asleep: asleep)
             let bucket = marqueeBucket(phase: physics.marqueePhase, asleep: asleep)
-            let cKey = MarqueeCycleKey(style: style, glowColor: glowRGBA, steps: steps)
+            let cKey = MarqueeCycleKey(style: style, glowColor: glowRGBA, steps: steps, mode: marqueeMode)
             if marqueeCycleCache?.key != cKey {
                 marqueeCycleCache = (cKey, Dictionary(minimumCapacity: steps))
             }
-            let baseBmp: KeyboardBitmap?
             if let cached = marqueeCycleCache?.bitmaps[bucket] {
-                baseBmp = cached
-            } else {
-                let qPhase = CGFloat(bucket) / CGFloat(steps)
-                let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
-                    renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase, glowBaseColor: glowBaseColor)
-                })
-                if let bmp { marqueeCycleCache?.bitmaps[bucket] = bmp }
-                baseBmp = bmp
+                cached.draw(in: ctx)
+                return
             }
-            if let baseBmp {
-                baseBmp.draw(in: ctx)
-                if !physics.keyGlow.isEmpty {
-                    let phase = physics.marqueePhase.truncatingRemainder(dividingBy: 1)
-                    let backlight = KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                                    start: artwork.deckStart, end: artwork.deckEnd)
-                    for (k, glow) in physics.keyGlow where glow > 0.01 {
-                        guard let keyArt = artwork.keyByKey[k] else { continue }
-                        ctx.saveGState()
-                        ctx.addPath(keyArt.erasePath)
-                        ctx.clip()
-                        artwork.chassis?.draw(in: ctx)
-                        drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath)
-                        ctx.restoreGState()
-                        drawKeyboardKey(keyArt, in: ctx, glow: glow, glowRGBA: glowRGBA, backlight: backlight, drawLegend: true)
-                    }
-                    for (key, glow) in physics.keyGlow where glow > 0.05 {
-                        let center = KeyboardLayout.canvasPoint(for: key)
-                        drawRadialGlow(in: ctx, center: center, radius: 17.0 + glow * 6.0,
-                                       color: glowBaseColor.withAlphaComponent(0.36 * glow))
-                    }
-                }
+            let qPhase = CGFloat(bucket) / CGFloat(steps)
+            if let bmp = KeyboardBitmap(bounds: artwork.bounds, scale: style.scale, draw: { mctx in
+                renderMarqueeKeyboard(in: mctx, artwork: artwork, phase: qPhase,
+                                      glowBaseColor: glowBaseColor, mode: marqueeMode)
+            }) {
+                marqueeCycleCache?.bitmaps[bucket] = bmp
+                bmp.draw(in: ctx)
                 return
             }
         }
@@ -1324,7 +1333,7 @@ enum CatRenderer {
             let phase = physics.marqueePhase.truncatingRemainder(dividingBy: 1)
             let backlight = marquee
                 ? KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                  start: artwork.deckStart, end: artwork.deckEnd)
+                                  start: artwork.deckStart, end: artwork.deckEnd, mode: marqueeMode)
                 : nil
             if let backlight { drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath) }
             let batchLegends = physics.keyGlow.isEmpty && artwork.legends != nil
@@ -1349,11 +1358,12 @@ enum CatRenderer {
         in ctx: CGContext,
         artwork: KeyboardArtwork,
         phase: CGFloat,
-        glowBaseColor: NSColor
+        glowBaseColor: NSColor,
+        mode: KeyboardMarqueeMode
     ) {
         artwork.chassis?.draw(in: ctx)
         let backlight = KeyboardMarquee(phase: phase, color: hsvColor(hue: phase + 0.52, saturation: 0.55, value: 1),
-                                        start: artwork.deckStart, end: artwork.deckEnd)
+                                        start: artwork.deckStart, end: artwork.deckEnd, mode: mode)
         drawMarquee(backlight, in: ctx, clippedTo: artwork.deckPath)
         let glowRGBA = RGBAColor(glowBaseColor)
         let batchLegends = artwork.legends != nil
@@ -1585,16 +1595,19 @@ enum CatRenderer {
         let rgba: RGBAColor
         let start: CGPoint
         let end: CGPoint
+        let mode: KeyboardMarqueeMode
         let dx: CGFloat
         let dy: CGFloat
         let lengthSquared: CGFloat
 
-        init(phase: CGFloat, color: NSColor, start: CGPoint, end: CGPoint) {
+        init(phase: CGFloat, color: NSColor, start: CGPoint, end: CGPoint,
+             mode: KeyboardMarqueeMode = .sweep) {
             self.phase = phase
             self.color = color
             self.rgba = RGBAColor(color)
             self.start = start
             self.end = end
+            self.mode = mode
             dx = end.x - start.x
             dy = end.y - start.y
             lengthSquared = dx * dx + dy * dy
@@ -1606,8 +1619,38 @@ enum CatRenderer {
         }
 
         func wave(at t: CGFloat) -> CGFloat {
-            let distance = phase - t
-            return exp(-(distance < 0 ? distance + 1 : distance) / 0.125)
+            switch mode {
+            case .sweep, .all:
+                let distance = phase - t
+                return exp(-(distance < 0 ? distance + 1 : distance) / 0.125)
+            case .loop:
+                // Circular distance so the trail leaving the right edge re-enters on the left.
+                var distance = (phase - t).truncatingRemainder(dividingBy: 1)
+                if distance < 0 { distance += 1 }
+                return exp(-distance / 0.125)
+            case .ripple:
+                // Ring expanding from the deck centre (t = 0.5) towards both edges (t = 0 / 1).
+                let fromCenter = abs(t - 0.5) * 2
+                return exp(-abs(phase - fromCenter) / 0.10)
+            }
+        }
+
+        /// Screen positions of the bright light heads for this mode.
+        func headPoints() -> [CGPoint] {
+            func point(at t: CGFloat) -> CGPoint {
+                CGPoint(x: start.x + dx * t, y: start.y + dy * t)
+            }
+            switch mode {
+            case .sweep, .all:
+                return [point(at: phase)]
+            case .loop:
+                // While wrapping, fade in the head entering from the left edge as well.
+                return phase > 0.85 ? [point(at: phase), point(at: phase - 1)] : [point(at: phase)]
+            case .ripple:
+                // Two symmetric heads travelling from the centre towards each edge.
+                let half = phase * 0.5
+                return [point(at: 0.5 - half), point(at: 0.5 + half)]
+            }
         }
     }
 
@@ -1618,23 +1661,26 @@ enum CatRenderer {
         ctx.addPath(deck)
         ctx.clip()
         let bucket = ((Int((light.phase * 60.0).rounded()) % 60) + 60) % 60
+        // Mode-dependent wave shapes must not share gradient cache entries.
+        let cacheKey = bucket * 4 + light.mode.rawValue
         let band: CGGradient?
-        if let cached = marqueeGradientCache[bucket] {
+        if let cached = marqueeGradientCache[cacheKey] {
             band = cached
         } else {
             let colors = marqueeStops.map { stop in
                 light.color.withAlphaComponent(light.wave(at: stop) * 200.0 / 255.0).cgColor
             }
             band = CGGradient(colorsSpace: rgbColorSpace, colors: colors as CFArray, locations: marqueeStops)
-            if let band { marqueeGradientCache[bucket] = band }
+            if let band { marqueeGradientCache[cacheKey] = band }
         }
         if let band {
             ctx.drawLinearGradient(band, start: light.start, end: light.end,
                                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
         }
-        let head = CGPoint(x: light.start.x + light.dx * light.phase, y: light.start.y + light.dy * light.phase)
-        drawRadialGlow(in: ctx, center: head, radius: 44.0,
-                       color: NSColor(calibratedRed: 240.0 / 255, green: 252.0 / 255, blue: 1, alpha: 150.0 / 255))
+        for head in light.headPoints() {
+            drawRadialGlow(in: ctx, center: head, radius: 44.0,
+                           color: NSColor(calibratedRed: 240.0 / 255, green: 252.0 / 255, blue: 1, alpha: 150.0 / 255))
+        }
         ctx.restoreGState()
     }
 
@@ -1647,8 +1693,8 @@ enum CatRenderer {
         let isDome: Bool
 
         init(yaw: CGFloat, pitch: CGFloat, tilt: CGFloat, headScale: CGFloat, isDome: Bool) {
-            let yawRad = yaw * 0.50
-            let pitchRad = pitch * 0.36
+            let yawRad = yaw * KuroRig.yawPerUnit
+            let pitchRad = pitch * KuroRig.pitchPerUnit
             self.cy = cos(yawRad)
             self.sy = sin(yawRad)
             self.cp = cos(pitchRad)
@@ -1666,13 +1712,13 @@ enum CatRenderer {
             } else {
                 let depth: CGFloat
                 if isDome {
-                    let rx = p.x / 46.0
-                    let ry = p.y / 40.0
+                    let rx = p.x / KuroRig.domeRadiusX
+                    let ry = p.y / KuroRig.domeRadiusY
                     let radius = max(0.0, 1.0 - rx * rx - ry * ry)
                     let surface = whiteSurface ? radius * radius * (3.0 - 2.0 * radius) : sqrt(radius)
-                    depth = 29.6 * surface
+                    depth = KuroRig.domeDepth * surface
                 } else {
-                    depth = 27.5
+                    depth = KuroRig.planeDepth
                 }
                 let x1 = p.x * cy + depth * sy
                 let z1 = -p.x * sy + depth * cy
@@ -1693,8 +1739,8 @@ enum CatRenderer {
         init(bodyWidth: CGFloat, bodySquash: CGFloat, lieIntensity: CGFloat, bodyTilt: CGFloat) {
             let lie = max(0.0, min(1.0, lieIntensity))
             let lieS = lie * lie * (3.0 - 2.0 * lie)
-            self.sy = bodySquash * (1.0 - lieS * 0.42)
-            let sx = (1.0 + (1.0 - bodySquash) * 0.55) * (1.0 + lieS * 0.03)
+            self.sy = bodySquash * (1.0 - lieS * KuroRig.lieSquash)
+            let sx = (1.0 + (1.0 - bodySquash) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
             self.sxTotal = bodyWidth * sx
             self.c = cos(bodyTilt)
             self.s = sin(bodyTilt)
@@ -2055,14 +2101,14 @@ enum CatRenderer {
 
     /// Head-local point -> canvas, on the skin's head surface (dome / plane) or flat skull space.
     private static func headPoint(_ p: CGPoint, skull: Bool, skin: SkinSpec, head: CGPoint, physics: CatPhysics, whiteSurface: Bool = false) -> CGPoint {
-        let rx = p.x / 46.0
-        let ry = p.y / 40.0
+        let rx = p.x / KuroRig.domeRadiusX
+        let ry = p.y / KuroRig.domeRadiusY
         let radius = max(0, 1 - rx * rx - ry * ry)
         let surface = whiteSurface ? radius * radius * (3 - 2 * radius) : sqrt(radius)
-        let depth: CGFloat = skin.headSurface == .dome ? 29.6 * surface : 27.5
+        let depth: CGFloat = skin.headSurface == .dome ? KuroRig.domeDepth * surface : KuroRig.planeDepth
         var projected = skull ? p : projectHead3D(x: p.x, y: p.y, z: depth,
-                                                  yawRad: physics.headYaw.value * 0.50,
-                                                  pitchRad: physics.headPitch.value * 0.36).pt
+                                                  yawRad: physics.headYaw.value * KuroRig.yawPerUnit,
+                                                  pitchRad: physics.headPitch.value * KuroRig.pitchPerUnit).pt
         let hs = skin.shape.headScale
         projected.x *= hs; projected.y *= hs
         let c = cos(physics.headTilt.value), s = sin(physics.headTilt.value)
@@ -2073,8 +2119,8 @@ enum CatRenderer {
         let bw = skin.shape.bodyWidth
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
-        let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-        let sx = (1 + (1 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1 + (1 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         let c = cos(physics.bodyTilt.value), s = sin(physics.bodyTilt.value)
         return CGPoint(x: seatX + p.x*bw*sx*c - p.y*sy*s,
                        y: seatY + p.x*bw*sx*s + p.y*sy*c)
@@ -2096,6 +2142,36 @@ enum CatRenderer {
         if closed { path.closeSubpath() }
         return path
     }
+    private static var airbrushStampCache: [UInt64: CGImage] = [:]
+
+    private static func airbrushStampImage(color: SkinColor, srgb: Bool) -> CGImage? {
+        let r8 = UInt64(max(0, min(255, Int((color.r * 255.0).rounded()))))
+        let g8 = UInt64(max(0, min(255, Int((color.g * 255.0).rounded()))))
+        let b8 = UInt64(max(0, min(255, Int((color.b * 255.0).rounded()))))
+        let a8 = UInt64(max(0, min(255, Int((color.a * 255.0).rounded()))))
+        let key: UInt64 = (srgb ? (1 << 32) : 0) | (a8 << 24) | (r8 << 16) | (g8 << 8) | b8
+        if let cached = airbrushStampCache[key] { return cached }
+        if airbrushStampCache.count >= 256 { airbrushStampCache.removeAll(keepingCapacity: true) }
+        let cs = srgb ? srgbColorSpace : rgbColorSpace
+        guard let bctx = CGContext(
+            data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 64 * 4,
+            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        let r = color.r, g = color.g, b = color.b, a = color.a
+        let colors: [CGColor] = [
+            CGColor(colorSpace: cs, components: [r, g, b, a * 0.34])!,
+            CGColor(colorSpace: cs, components: [r, g, b, a * 0.16])!,
+            CGColor(colorSpace: cs, components: [r, g, b, 0.0])!
+        ]
+        if let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: [0.0, 0.45, 1.0]) {
+            let center = CGPoint(x: 32.0, y: 32.0)
+            bctx.drawRadialGradient(grad, startCenter: center, startRadius: 0, endCenter: center, endRadius: 29.5, options: [])
+        }
+        guard let img = bctx.makeImage() else { return nil }
+        airbrushStampCache[key] = img
+        return img
+    }
+
     /// Strokes get round caps, except tail-space strokes (bands around the tail) which are cut flat.
     private static func drawMark(in ctx: CGContext, _ mark: SkinMark, cap: CGLineCap = .round, srgb: Bool = false, map: (CGPoint) -> CGPoint) {
         guard !mark.points.isEmpty else { return }
@@ -2130,17 +2206,10 @@ enum CatRenderer {
         if mark.brush == .airbrush {
             let radius = max(2.2, baseW * 1.15)
             let stepDist = max(1.4, radius * 0.34)
-            let cs = srgb ? srgbColorSpace : rgbColorSpace
-            let r = mark.color.r, g = mark.color.g, b = mark.color.b, a = mark.color.a
-            let colors: [CGColor] = [
-                CGColor(colorSpace: cs, components: [r, g, b, a * 0.34])!,
-                CGColor(colorSpace: cs, components: [r, g, b, a * 0.16])!,
-                CGColor(colorSpace: cs, components: [r, g, b, 0.0])!
-            ]
-            let locs: [CGFloat] = [0.0, 0.45, 1.0]
-            if let grad = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: locs) {
+            let drawR = radius * (32.0 / 29.5)
+            if let stampImg = airbrushStampImage(color: mark.color, srgb: srgb) {
                 let stamp: (CGPoint) -> Void = { pt in
-                    ctx.drawRadialGradient(grad, startCenter: pt, startRadius: 0, endCenter: pt, endRadius: radius, options: [])
+                    ctx.draw(stampImg, in: CGRect(x: pt.x - drawR, y: pt.y - drawR, width: drawR * 2.0, height: drawR * 2.0))
                 }
                 if mapped.count == 1 {
                     stamp(mapped[0])
@@ -2416,8 +2485,8 @@ enum CatRenderer {
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
         let squash = physics.bodySquash.value
-        let sy = squash * (1.0 - lieS * 0.42)
-        let sx = (1.0 + (1.0 - squash) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = squash * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1.0 + (1.0 - squash) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         let bTilt = physics.bodyTilt.value
         let cB = cos(bTilt), sB = sin(bTilt)
         func B(_ lx: CGFloat, _ ly: CGFloat) -> CGPoint {
@@ -2850,8 +2919,8 @@ enum CatRenderer {
         let cB = cos(bTilt), sB = sin(bTilt)
         let lie = max(0, min(1, physics.lieIntensity.value))
         let lieS = lie * lie * (3.0 - 2.0 * lie)
-        let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-        let sx = (1.0 + (1.0 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+        let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+        let sx = (1.0 + (1.0 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
         func B(_ lx: CGFloat, _ ly: CGFloat) -> CGPoint {
             let rx = lx * bw * sx
             let ry = ly * sy
@@ -3018,8 +3087,8 @@ enum CatRenderer {
 
             if let point = pal.points {
                 let mid = pal.pointsMid ?? point
-                let yawRad = yaw * 0.50
-                let pitchRad = pitch * 0.36
+                let yawRad = yaw * KuroRig.yawPerUnit
+                let pitchRad = pitch * KuroRig.pitchPerUnit
                 let pointGrads = cachedPointsGradients(point: point, mid: mid, srgb: srgb)
                 ctx.saveGState()
                 ctx.translateBy(x: headCenter.x, y: headCenter.y)
@@ -3327,8 +3396,8 @@ enum CatRenderer {
         ctx.rotate(by: physics.headTilt.value)
         if skin.shape.headScale != 1 { ctx.scaleBy(x: skin.shape.headScale, y: skin.shape.headScale) }
 
-        let yawRad = physics.headYaw.value * 0.50
-        let pitchRad = physics.headPitch.value * 0.36
+        let yawRad = physics.headYaw.value * KuroRig.yawPerUnit
+        let pitchRad = physics.headPitch.value * KuroRig.pitchPerUnit
         let fold = physics.earFold.value
         let twitch = physics.earTwitch.value * 0.045
 
@@ -3478,8 +3547,8 @@ enum CatRenderer {
 
         let yaw = physics.headYaw.value      // -1 (left) .. +1 (right)
         let pitch = physics.headPitch.value  // -1 (up)   .. +1 (down)
-        let yawRad = yaw * 0.50              // ~±28.5° authentic head turn
-        let pitchRad = pitch * 0.36          // ~±20.5° authentic head nod
+        let yawRad = yaw * KuroRig.yawPerUnit              // ~±28.5° authentic head turn
+        let pitchRad = pitch * KuroRig.pitchPerUnit          // ~±20.5° authentic head nod
 
         if skin.renderStyle == .dazed {
             drawDazedFace(in: ctx, physics: physics, eyeTheme: eyeTheme, yawRad: yawRad, pitchRad: pitchRad, scruffStartle: scruffStartle, scruffWide: scruffWide)
@@ -4069,7 +4138,7 @@ enum CatRenderer {
     private static func drawDecorations(in ctx: CGContext, seatX: CGFloat, seatY: CGFloat, head: CGPoint, physics: CatPhysics, skin: SkinSpec,
                                         neckOverride: CGPoint? = nil, tailTipOverride: CGPoint? = nil,
                                         anchors: Set<SkinAnchorPoint>? = nil) {
-        let yawRad = physics.headYaw.value * 0.50, pitchRad = physics.headPitch.value * 0.36
+        let yawRad = physics.headYaw.value * KuroRig.yawPerUnit, pitchRad = physics.headPitch.value * KuroRig.pitchPerUnit
         for deco in skin.decorations {
             if let anchors = anchors, !anchors.contains(deco.anchor) { continue }
             var at = CGPoint.zero
@@ -4155,8 +4224,8 @@ enum CatRenderer {
         let faceClearance: CGFloat = (approved ? 52.0 : 51.0) + tiltChinDrop
         let faceBottom = headBottom + faceClearance
         func shoulder(_ x: CGFloat) -> CGPoint {
-            let sy = physics.bodySquash.value * (1.0 - lieS * 0.42)
-            let sx = (1.0 + (1.0 - physics.bodySquash.value) * 0.55) * (1.0 + lieS * 0.03)
+            let sy = physics.bodySquash.value * (1.0 - lieS * KuroRig.lieSquash)
+            let sx = (1.0 + (1.0 - physics.bodySquash.value) * KuroRig.squashWiden) * (1.0 + lieS * KuroRig.lieWiden)
             let c = cos(physics.bodyTilt.value), s = sin(physics.bodyTilt.value)
             return CGPoint(x: seatX + x*sx*c + shoulderDepth*sy*s,
                            y: max(seatY + x*sx*s - shoulderDepth*sy*c, faceBottom - max(0, -armRY) * 0.6))
@@ -8378,20 +8447,47 @@ enum CatRenderer {
                 }
             } else if skin.colorpoint {
                 let mid = pal.pointsMid ?? pal.legs
-                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
-                if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.20, 0.54, 0.88]) {
-                    ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                let pointCol = pal.points ?? pal.paws
+                if pointCol == pal.paws {
+                    let cols = [sc(pal.body, 0.0, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.16, 0.48, 0.78]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
+                    }
+                } else {
+                    let cols = [sc(pal.body, 0.0, skin).cgColor, sc(pal.body, skin).cgColor, sc(mid, skin).cgColor, sc(pointCol, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.16, 0.46, 0.72, 0.88]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsAfterEndLocation])
+                    }
                 }
             } else if let armSpace = limb.armSpace, let limbGrad = skin.partGradients[armSpace.rawValue] {
                 drawClampedPartGradient(in: ctx, limbGrad, start: limb.root, end: limb.tip, srgb: srgb)
-            } else if !limb.isBehindBody && pal.legs != pal.body {
-                let cols = [sc(pal.body, skin).cgColor, sc(pal.body, skin).cgColor, sc(pal.legs, skin).cgColor, sc(pal.paws, skin).cgColor] as CFArray
-                if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.14, 0.42, 0.82]) {
-                    ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            } else if !limb.isBehindBody {
+                let legCol = pal.legs
+                let pawCol = pal.paws
+                if let chest = pal.belly, chest != legCol {
+                    if pawCol != legCol {
+                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
+                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30, 0.68, 0.84]) {
+                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                        }
+                    } else {
+                        let cols = [sc(chest, skin).cgColor, sc(legCol, skin).cgColor] as CFArray
+                        if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.30]) {
+                            ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                        }
+                    }
+                } else if pawCol != legCol {
+                    let cols = [sc(legCol, skin).cgColor, sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
+                    if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.0, 0.68, 0.84]) {
+                        ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+                    }
+                } else {
+                    ctx.setFillColor(sc(legCol, skin).cgColor)
+                    ctx.fillPath()
                 }
             } else {
-                let legCol = limb.isBehindBody ? (pal.hindLeg ?? pal.legs) : pal.legs
-                let pawCol = limb.isBehindBody ? (pal.hindPaw ?? pal.paws) : pal.paws
+                let legCol = pal.hindLeg ?? pal.legs
+                let pawCol = pal.hindPaw ?? pal.paws
                 let cols = [sc(legCol, skin).cgColor, sc(pawCol, skin).cgColor] as CFArray
                 if let grad = CGGradient(colorsSpace: cs, colors: cols, locations: [0.22, 0.75]) {
                     ctx.drawLinearGradient(grad, start: limb.root, end: limb.tip, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
@@ -8530,10 +8626,16 @@ enum CatRenderer {
             ctx.setLineCap(.round)
         }
         if !isDazed, let tipColor = pal.tailTip {
+            // Tail tip = last 22% of the tail curve (de Casteljau split at t = 0.78, same as the idle tail tip).
+            // A straight chord only touches the curve at the tip and cuts across the bend, so the colour ended up
+            // outside the silhouette on the convex side and left fur showing on the inside.
+            let tipT: CGFloat = 0.78
+            let ta = lerpPt(tailPivot, tailC1, tipT), tb = lerpPt(tailC1, tailC2, tipT), tq = lerpPt(tailC2, tailTip, tipT)
+            let td = lerpPt(ta, tb, tipT), te = lerpPt(tb, tq, tipT)
             ctx.setStrokeColor(sc(tipColor, skin).cgColor)
-            ctx.setLineWidth(tailW * 0.92)
-            ctx.move(to: lerpPt(tailC2, tailTip, 0.35))
-            ctx.addLine(to: tailTip)
+            ctx.setLineWidth(tailW)
+            ctx.move(to: lerpPt(td, te, tipT))
+            ctx.addCurve(to: tailTip, control1: te, control2: tq)
             ctx.strokePath()
         }
         ctx.restoreGState()
@@ -8839,6 +8941,10 @@ enum CatRenderer {
             let dragNeck = CGPoint(x: headCenter.x + hipLagX * 0.08, y: headCenter.y + 36.0 * hs)
             drawDecorations(in: ctx, seatX: rumpCenterX, seatY: torsoBottomY, head: headCenter, physics: physics, skin: skin,
                             neckOverride: dragNeck, tailTipOverride: tailTip, anchors: [.neck, .face, .headTop])
+        }
+        // 8. Auto-worn 2.5D headphones & floating music notes stay on the cat's head while dragged!
+        if physics.musicIntensity > 0.01 {
+            drawMusicHeadphones(in: ctx, center: headCenter, physics: physics, eyeTheme: eyeTheme, skin: skin)
         }
         if catLayerAlpha < 0.995 {
             ctx.endTransparencyLayer()

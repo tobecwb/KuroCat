@@ -19,6 +19,21 @@ enum KeyboardTheme: String, CaseIterable {
     case retroCream = "复古奶油灰"
 }
 
+/// How the keyboard RGB backlight travels across the deck.
+enum KeyboardMarqueeMode: Int, CaseIterable {
+    /// Cycle through every mode automatically (default).
+    case all = 3
+    /// Single band sweeping left → right, then restarting at the left edge (original behaviour).
+    case sweep = 0
+    /// Seamless circular wrap: the trail leaving the right edge re-enters from the left.
+    case loop = 1
+    /// A ring expanding outward from the deck centre towards both edges.
+    case ripple = 2
+
+    /// Modes used by the `.all` auto-rotation (order matters for the cycle).
+    static let rotation: [KeyboardMarqueeMode] = [.sweep, .loop, .ripple]
+}
+
 enum CatCoatTheme: String, CaseIterable {
     case classicBlack = "经典小黑猫 (原版)"
     case siamese = "挖煤暹罗猫"
@@ -115,6 +130,9 @@ final class CatSettings {
     }
     var keyboardMarquee: Bool {
         didSet { UserDefaults.standard.set(keyboardMarquee, forKey: "KuroCat.KeyboardMarquee") }
+    }
+    var marqueeMode: KeyboardMarqueeMode {
+        didSet { UserDefaults.standard.set(marqueeMode.rawValue, forKey: "KuroCat.MarqueeMode") }
     }
     var levelKeyboard: Bool {
         didSet {
@@ -255,6 +273,7 @@ final class CatSettings {
         footEasterEgg = d.object(forKey: "KuroCat.FootEasterEgg") as? Bool ?? true
         tailEasterEgg = d.object(forKey: "KuroCat.TailEasterEgg") as? Bool ?? true
         keyboardMarquee = d.object(forKey: "KuroCat.KeyboardMarquee") as? Bool ?? true
+        marqueeMode = KeyboardMarqueeMode(rawValue: d.object(forKey: "KuroCat.MarqueeMode") as? Int ?? 3) ?? .all
         levelKeyboard = d.object(forKey: "KuroCat.LevelKeyboard") as? Bool ?? true
         KeyboardLayout.levelKeyboard = levelKeyboard
         obsCaptureMode = d.object(forKey: "KuroCat.OBSCaptureMode") as? Int ?? 0
@@ -396,6 +415,19 @@ final class CatPhysics {
     // Keyboard marquee: normalized position (0..1) of the light head, plus its speed boost.
     var marqueePhase: CGFloat = 0
     var marqueeBoost = Spring1D(0)
+    /// Elapsed seconds inside the current mode while `.all` auto-rotation is active.
+    private var marqueeRotationElapsed: Double = 0
+    /// Seconds each marquee mode stays on screen before the next one takes over.
+    private let marqueeRotationPeriod: Double = 10
+    private(set) var marqueeRotationIndex: Int = 0
+
+    /// The mode actually rendered this frame: the user's pick, or the rotating one when `.all`.
+    var effectiveMarqueeMode: KeyboardMarqueeMode {
+        let selected = CatSettings.shared.marqueeMode
+        guard selected == .all else { return selected }
+        let rotation = KeyboardMarqueeMode.rotation
+        return rotation[marqueeRotationIndex % rotation.count]
+    }
 
     var bodyShiftX = Spring1D(0)
     var bodyTilt = Spring1D(0)       // radians
@@ -1366,6 +1398,14 @@ final class CatPhysics {
             marqueeBoost.target = max(0, min(1, (CGFloat(activeKeys.count) - 2) / 5))
             marqueeBoost.step(dt: dt, stiffness: 90, damping: 20)
             marqueePhase = (marqueePhase + dt * (0.42 + 0.40 * marqueeBoost.value)).truncatingRemainder(dividingBy: 1.0)
+            // `.all` rotates sweep → loop → ripple so every mode gets its turn.
+            if CatSettings.shared.marqueeMode == .all {
+                marqueeRotationElapsed += dt
+                if marqueeRotationElapsed >= marqueeRotationPeriod {
+                    marqueeRotationElapsed -= marqueeRotationPeriod
+                    marqueeRotationIndex = (marqueeRotationIndex + 1) % KeyboardMarqueeMode.rotation.count
+                }
+            }
         }
         let tailKey = orderedKeys.first { $0 != leftKey && $0 != rightKey && $0 != footKey }
         var tip = tailTyping.target > 0 ? tailKey.map { KeyboardLayout.canvasPoint(for: $0) } ?? CGPoint(x: 275, y: 196) : CGPoint(x: 275, y: 196)
@@ -1706,7 +1746,20 @@ struct SkinSpec {
     var preview: Data?
 
     static let maxFileBytes = 2 * 1024 * 1024
-    static let formatVersion = 1
+    // formatVersion 2 = same fields as 1, written by the workshop when the skin needs an app newer than 1.5.2
+    // (the last release that only knew formatVersion 1); `minAppVersion` says which one.
+    static let formatVersion = 2
+    static let maxMarks = 1024 // 256 up to 1.5.2
+
+    /// -1 / 0 / 1 for dotted numeric versions ("1.4.10" > "1.4.9"); missing parts count as 0.
+    static func compareVersions(_ a: String, _ b: String) -> Int {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
+    }
 
     var colorpoint: Bool { palette.points != nil }
     func hasPartArt(_ space: SkinSpace) -> Bool {
@@ -1864,6 +1917,15 @@ struct SkinSpec {
         guard let vn = numberValue(ver), vn == vn.rounded() else { throw fail(loc("formatVersion 必须是整数", "formatVersion must be an integer", "formatVersion precisa ser um número inteiro")) }
         if vn > Double(formatVersion) { throw fail(loc("这个皮肤使用了更新的格式（formatVersion \(Int(vn))），请先升级 KuroCat", "This skin uses a newer format (formatVersion \(Int(vn))); please update KuroCat first", "Esta skin usa um formato mais novo (formatVersion \(Int(vn))); atualize o KuroCat primeiro")) }
         if vn < 1 { throw fail(loc("formatVersion 无效", "Invalid formatVersion", "formatVersion inválido")) }
+        if let minApp = root["minAppVersion"] {
+            guard let v = minApp as? String, v.count <= 16,
+                  v.range(of: #"^[0-9]+(\.[0-9]+)*$"#, options: .regularExpression) != nil
+            else { throw fail(loc("minAppVersion 必须是形如 \"1.5.3\" 的版本号", "minAppVersion must be a version like \"1.5.3\"", "minAppVersion precisa ser uma versão como \"1.5.3\"")) }
+            // Unset in tests and other bundles without a version: skip the check there.
+            if let app = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, compareVersions(v, app) > 0 {
+                throw fail(loc("这个皮肤需要 KuroCat \(v) 或更新版本（当前 \(app)），请先升级 KuroCat", "This skin needs KuroCat \(v) or newer (current \(app)); please update KuroCat first", "Esta skin precisa do KuroCat \(v) ou mais novo (atual \(app)); atualize o KuroCat primeiro"))
+            }
+        }
 
         var spec = SkinSpec()
         guard let name = root["name"] as? String else { throw fail(loc("缺少皮肤名称 name", "Missing skin name (name)", "Falta o nome da skin (name)")) }
@@ -2004,7 +2066,7 @@ struct SkinSpec {
         // Marks (polygons / strokes, same model as the built-in CoatMark artwork)
         if let marksAny = root["marks"], !isNull(marksAny) {
             guard let marks = marksAny as? [Any] else { throw fail(loc("marks 必须是数组", "marks must be an array", "marks precisa ser uma lista")) }
-            if marks.count > 256 { throw fail(loc("marks 最多 256 条", "marks allows at most 256 entries", "marks aceita no máximo 256 itens")) }
+            if marks.count > maxMarks { throw fail(loc("marks 最多 \(maxMarks) 条", "marks allows at most \(maxMarks) entries", "marks aceita no máximo \(maxMarks) itens")) }
             for (i, mAny) in marks.enumerated() {
                 let f = "marks[\(i)]"
                 guard let m = mAny as? [String: Any] else { throw fail(loc("\(f) 必须是对象", "\(f) must be an object", "\(f) precisa ser um objeto")) }
@@ -2442,3 +2504,23 @@ final class KeyboardSkinLibrary {
         return ok
     }
 }
+
+// <rig:generated> generated by scripts/gen-rig.py from shared/rig.json; edit that file, not this block
+enum KuroRig {
+    static let canvasWidth: CGFloat = 360.0
+    static let canvasHeight: CGFloat = 320.0
+    static let seatX: CGFloat = 184.0
+    static let seatY: CGFloat = 226.0
+    static let yawPerUnit: CGFloat = 0.5
+    static let pitchPerUnit: CGFloat = 0.36
+    static let maxHeadYaw: CGFloat = 1.0
+    static let headShiftPerYaw: CGFloat = 7.5
+    static let domeRadiusX: CGFloat = 46.0
+    static let domeRadiusY: CGFloat = 40.0
+    static let domeDepth: CGFloat = 29.6
+    static let planeDepth: CGFloat = 27.5
+    static let lieSquash: CGFloat = 0.42
+    static let squashWiden: CGFloat = 0.55
+    static let lieWiden: CGFloat = 0.03
+}
+// </rig:generated>

@@ -331,6 +331,10 @@ public:
         return lastRawKbTime_ > 0.0 ? now - lastRawKbTime_ : 1e9;
     }
 
+    static bool isMouseButtonsSwapped() {
+        return GetSystemMetrics(SM_SWAPBUTTON) != 0;
+    }
+
     void handleRawInput(LPARAM lParam) {
         UINT size = 0;
         if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size == 0) {
@@ -370,12 +374,19 @@ public:
                 lastRegularMouseEventTime_ = now;
             }
             if (m.usButtonFlags != 0) lastRegularMouseEventTime_ = now;
-            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)   { lastRawLeftBtnTime_ = now;  updateMouseButton(0, true); }
-            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)     { lastRawLeftBtnTime_ = now;  updateMouseButton(0, false); }
-            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)  { lastRawRightBtnTime_ = now; updateMouseButton(1, true); }
-            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)    { lastRawRightBtnTime_ = now; updateMouseButton(1, false); }
-            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) { lastRawOtherBtnTime_ = now; updateMouseButton(2, true); }
-            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   { lastRawOtherBtnTime_ = now; updateMouseButton(2, false); }
+            bool swapped = isMouseButtonsSwapped();
+            int primaryBtn = swapped ? 1 : 0;
+            int secondaryBtn = swapped ? 0 : 1;
+            auto recordBtnTime = [&](int btn) {
+                if (btn == 0) lastRawLeftBtnTime_ = now;
+                else lastRawRightBtnTime_ = now;
+            };
+            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)   { recordBtnTime(primaryBtn);   updateMouseButton(primaryBtn, true); }
+            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)     { recordBtnTime(primaryBtn);   updateMouseButton(primaryBtn, false); }
+            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)  { recordBtnTime(secondaryBtn); updateMouseButton(secondaryBtn, true); }
+            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)    { recordBtnTime(secondaryBtn); updateMouseButton(secondaryBtn, false); }
+            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) { lastRawOtherBtnTime_ = now;  updateMouseButton(2, true); }
+            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   { lastRawOtherBtnTime_ = now;  updateMouseButton(2, false); }
             if (m.usButtonFlags & RI_MOUSE_WHEEL)              lastMouseMoveTime = now;
         } else if (raw->header.dwType == RIM_TYPEHID) {
             if (raw->data.hid.dwSizeHid > 0 && raw->data.hid.dwCount > 0) {
@@ -601,17 +612,21 @@ private:
             }
         }
 
-        // Reconcile each mouse button using its own button-event timestamp (not cursor motion!)
+        // Reconcile each mouse button using its own button-event timestamp (not cursor motion!).
+        // GetAsyncKeyState always queries physical buttons, so remap when SM_SWAPBUTTON is enabled.
+        bool swapped = isMouseButtonsSwapped();
+        int primaryVk = swapped ? VK_RBUTTON : VK_LBUTTON;
+        int secondaryVk = swapped ? VK_LBUTTON : VK_RBUTTON;
         if (leftMouseDown) {
-            bool lDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            bool lDown = (GetAsyncKeyState(primaryVk) & 0x8000) != 0;
             if (!lDown && (now - lastRawLeftBtnTime_) > 0.20) updateMouseButton(0, false);
-        } else if ((now - lastRawMouseTime_) > 0.25 && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) {
+        } else if ((now - lastRawMouseTime_) > 0.25 && (GetAsyncKeyState(primaryVk) & 0x8000) != 0) {
             updateMouseButton(0, true);
         }
         if (rightMouseDown) {
-            bool rDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+            bool rDown = (GetAsyncKeyState(secondaryVk) & 0x8000) != 0;
             if (!rDown && (now - lastRawRightBtnTime_) > 0.20) updateMouseButton(1, false);
-        } else if ((now - lastRawMouseTime_) > 0.25 && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0) {
+        } else if ((now - lastRawMouseTime_) > 0.25 && (GetAsyncKeyState(secondaryVk) & 0x8000) != 0) {
             updateMouseButton(1, true);
         }
         if (otherMouseDown) {

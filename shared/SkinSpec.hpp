@@ -113,9 +113,33 @@ struct SkinSpec {
         return false;
     }
 
-    // Static limits of formatVersion 1.
+    // Static limits. formatVersion 2 = same fields as 1, written by the workshop when the skin needs an app newer
+    // than 1.5.2 (the last release that only knew formatVersion 1); `minAppVersion` says which one.
     static constexpr size_t MaxFileBytes = 2 * 1024 * 1024;
-    static constexpr int FormatVersion = 1;
+    static constexpr int FormatVersion = 2;
+    static constexpr size_t MaxMarks = 1024; // 256 up to 1.5.2
+    // The running app's version ("1.5.3"), set once at startup; empty (tests) skips the minAppVersion check.
+    static inline std::string appVersion;
+    // -1 / 0 / 1 for dotted numeric versions ("1.4.10" > "1.4.9"); missing parts count as 0.
+    static int compareVersions(const std::string& a, const std::string& b) {
+        size_t i = 0, j = 0;
+        while (i < a.size() || j < b.size()) {
+            long x = 0, y = 0;
+            while (i < a.size() && a[i] != '.') x = x * 10 + (a[i++] - '0');
+            while (j < b.size() && b[j] != '.') y = y * 10 + (b[j++] - '0');
+            if (x != y) return x < y ? -1 : 1;
+            ++i; ++j;
+        }
+        return 0;
+    }
+    static bool isVersionString(const std::string& v) {
+        if (v.empty() || v.size() > 16 || v.front() == '.' || v.back() == '.') return false;
+        for (size_t k = 0; k < v.size(); ++k) {
+            if (v[k] == '.') { if (v[k - 1] == '.') return false; }
+            else if (v[k] < '0' || v[k] > '9') return false;
+        }
+        return true;
+    }
 
     static bool parse(const std::string& bytes, SkinSpec& out, std::string& error);
     static bool loadFile(const std::string& path, SkinSpec& out, std::string& error);
@@ -450,6 +474,15 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     if (ver->type != Value::JNumber || ver->n != std::floor(ver->n)) { error = kurocat::uiText("formatVersion 必须是整数", "formatVersion must be an integer", "formatVersion precisa ser um número inteiro"); return false; }
     if (ver->n > FormatVersion) { error = std::string(kurocat::uiText("这个皮肤使用了更新的格式（formatVersion ", "This skin uses a newer format (formatVersion ", "Esta skin usa um formato mais novo (formatVersion ")) + std::to_string((long long)ver->n) + kurocat::uiText("），请先升级 KuroCat", "); please update KuroCat first", "); atualize o KuroCat primeiro"); return false; }
     if (ver->n < 1) { error = kurocat::uiText("formatVersion 无效", "Invalid formatVersion", "formatVersion inválido"); return false; }
+    if (const Value* minApp = root.get("minAppVersion")) {
+        if (minApp->type != Value::JString || !isVersionString(minApp->s)) { error = kurocat::uiText("minAppVersion 必须是形如 \"1.5.3\" 的版本号", "minAppVersion must be a version like \"1.5.3\"", "minAppVersion precisa ser uma versão como \"1.5.3\""); return false; }
+        if (!appVersion.empty() && compareVersions(minApp->s, appVersion) > 0) {
+            error = std::string(kurocat::uiText("这个皮肤需要 KuroCat ", "This skin needs KuroCat ", "Esta skin precisa do KuroCat ")) + minApp->s
+                + kurocat::uiText(" 或更新版本（当前 ", " or newer (current ", " ou mais novo (atual ") + appVersion
+                + kurocat::uiText("），请先升级 KuroCat", "); please update KuroCat first", "); atualize o KuroCat primeiro");
+            return false;
+        }
+    }
 
     SkinSpec s;
     const Value* name = root.get("name");
@@ -601,7 +634,7 @@ inline bool SkinSpec::parse(const std::string& bytes, SkinSpec& out, std::string
     // Marks (polygons / strokes, same model as the built-in CoatMark artwork)
     if (const Value* marks = root.get("marks")) {
         if (marks->type != Value::JArray) { error = kurocat::uiText("marks 必须是数组", "marks must be an array", "marks precisa ser uma lista"); return false; }
-        if (marks->items.size() > 256) { error = kurocat::uiText("marks 最多 256 条", "marks allows at most 256 entries", "marks aceita no máximo 256 itens"); return false; }
+        if (marks->items.size() > MaxMarks) { error = std::string(kurocat::uiText("marks 最多 ", "marks allows at most ", "marks aceita no máximo ")) + std::to_string(MaxMarks) + kurocat::uiText(" 条", " entries", " itens"); return false; }
         for (size_t i = 0; i < marks->items.size(); ++i) {
             const Value& m = marks->items[i];
             std::string f = "marks[" + std::to_string(i) + "]";

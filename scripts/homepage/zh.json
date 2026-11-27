@@ -5,6 +5,7 @@
   "og_image_alt": "KuroCat 开源全平台原生桌面萌猫官网预览图（含实时网页桌宠与键盘交互演示）",
   "canonical": "https://kurocat.cc/",
   "base": "",
+  "rel_base": "./",
   "lang_href": "/en/",
   "lang_alt": "en",
   "lang_label": "EN",

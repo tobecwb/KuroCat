@@ -5,6 +5,7 @@
   "og_image_alt": "KuroCat open-source native desktop cat website preview with live interactive web pet",
   "canonical": "https://kurocat.cc/en/",
   "base": "../",
+  "rel_base": "../",
   "lang_href": "/",
   "lang_alt": "zh-CN",
   "lang_label": "中文",
