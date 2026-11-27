@@ -2,10 +2,13 @@
 (function (global) {
   'use strict';
 
-  const VALID_SPACES = ['head', 'skull', 'body', 'tail', 'leftEar', 'rightEar'];
+  const VALID_SPACES = ['head', 'skull', 'body', 'tail', 'leftEar', 'rightEar', 'leftArm', 'rightArm', 'hindLeg'];
+  const VALID_BRUSHES = ['round', 'soft', 'airbrush', 'smudge'];
   const PALETTE_KEYS = [
-    'body', 'bodyShade', 'belly', 'legs', 'paws', 'pawPads',
-    'earOuter', 'earInner', 'nose', 'mouth', 'iris',
+    'body', 'headBody', 'bodyShade', 'belly', 'legs', 'paws', 'pawPads',
+    'hindLeg', 'hindPaw',
+    'earOuter', 'earInner', 'nose', 'mouth',
+    'iris', 'irisLeft', 'irisRight', 'pupil', 'pupilLeft', 'pupilRight',
     'tail', 'tailTip', 'stripes', 'whiskers', 'crease',
     'outline', 'points', 'pointsMid'
   ];
@@ -18,9 +21,30 @@
     earSize: [0.80, 1.25, 1.0],
     earBaseWidth: [0.65, 1.40, 1.0],
     earPointiness: [0.50, 1.50, 1.0],
+    earSpacing: [0.65, 1.35, 1.0],
     tailLength: [0.70, 1.30, 1.0],
     tailThickness: [0.70, 1.50, 1.0],
+    tailRootY: [-14.0, 14.0, 0.0],
+    armSpacing: [0.55, 1.60, 1.0],
+    armRootY: [-18.0, 18.0, 0.0],
+    armLength: [0.65, 1.45, 1.0],
+    hindLegRootX: [-16.0, 16.0, 0.0],
+    hindLegRootY: [-14.0, 14.0, 0.0],
+    hindLegWidth: [0.70, 1.45, 1.0],
+    hindLegReach: [0.75, 1.35, 1.0],
     pawStagger: [0.0, 1.0, 1.0]
+  };
+
+  // What the desktop parser clamps to (KuroCat/shared/SkinSpec.hpp, Sources/CatPhysics.swift). SHAPE_RANGES above is
+  // the editor's slider range and may be narrower; parsing a file always clamps to these so the web pet and the
+  // desktop draw the same cat from the same numbers.
+  const SHAPE_LIMITS = {
+    bodyWidth: [0.85, 1.35], headScale: [0.90, 1.15], cheekFullness: [0.85, 1.25], neckWidth: [0.65, 1.40],
+    earSize: [0.80, 1.25], earBaseWidth: [0.65, 1.40], earPointiness: [0.50, 1.50], earSpacing: [0.60, 1.50],
+    tailLength: [0.70, 1.30], tailThickness: [0.70, 1.50], tailRootY: [-30.0, 30.0],
+    armSpacing: [0.50, 1.60], armRootY: [-30.0, 30.0], armLength: [0.60, 1.50],
+    hindLegRootX: [-24.0, 24.0], hindLegRootY: [-24.0, 24.0], hindLegWidth: [0.60, 1.60], hindLegReach: [0.65, 1.50],
+    pawStagger: [0.0, 1.0]
   };
 
   function clamp(v, lo, hi) {
@@ -122,7 +146,9 @@
     body: { x0: -300, y0: -300, x1: 300, y1: 300 },
     tail: { x0: -4, y0: -40, x1: 104, y1: 40 },
     leftEar: { x0: -200, y0: -260, x1: 200, y1: 60 },
-    rightEar: { x0: -200, y0: -260, x1: 200, y1: 60 }
+    rightEar: { x0: -200, y0: -260, x1: 200, y1: 60 },
+    leftArm: { x0: -4, y0: -24, x1: 104, y1: 24 },
+    rightArm: { x0: -4, y0: -24, x1: 104, y1: 24 }
   };
 
   function unitVec(x, y) {
@@ -245,7 +271,7 @@
   }
 
   // --- Left/right mirroring (face and body centre line is x = 0; ears swap sides, tails have no mirror) ---
-  const MIRROR_EAR = { leftEar: 'rightEar', rightEar: 'leftEar' };
+  const MIRROR_EAR = { leftEar: 'rightEar', rightEar: 'leftEar', leftArm: 'rightArm', rightArm: 'leftArm' };
 
   function canMirror(space) {
     return space !== 'tail';
@@ -278,8 +304,14 @@
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       return { ok: false, error: '皮肤文件最外层必须是 JSON 对象' };
     }
-    if (raw.formatVersion !== 1) {
-      return { ok: false, error: 'formatVersion 必须为 1' };
+    if (!Number.isInteger(raw.formatVersion) || raw.formatVersion < 1) {
+      return { ok: false, error: 'formatVersion 必须是正整数' };
+    }
+    if (raw.formatVersion > FORMAT_VERSION_MAX) {
+      return { ok: false, error: `这个皮肤使用了更新的格式（formatVersion ${raw.formatVersion}），请刷新工坊页面` };
+    }
+    if (raw.minAppVersion !== undefined && !isVersionString(raw.minAppVersion)) {
+      return { ok: false, error: 'minAppVersion 必须是形如 "1.5.3" 的版本号' };
     }
     const name = typeof raw.name === 'string' ? raw.name.trim() : '';
     if (!name) return { ok: false, error: '皮肤名称 name 不能为空' };
@@ -335,7 +367,7 @@
     }
     if (raw.marks) {
       if (!Array.isArray(raw.marks)) return { ok: false, error: 'marks 必须是数组' };
-      if (raw.marks.length > 256) return { ok: false, error: 'marks 最多 256 条' };
+      if (raw.marks.length > MAX_MARKS) return { ok: false, error: `marks 最多 ${MAX_MARKS} 条` };
       for (let i = 0; i < raw.marks.length; i++) {
         const m = raw.marks[i];
         if (!VALID_SPACES.includes(m.space)) return { ok: false, error: `marks[${i}].space 无效` };
@@ -378,6 +410,12 @@
     if (!pal.body) pal.body = parseHexColor('#161618');
     if (!pal.legs) pal.legs = { ...pal.body };
     if (!pal.paws) pal.paws = pal.points ? { ...pal.points } : { ...pal.legs };
+    if (!pal.hindLeg) pal.hindLeg = Object.assign({}, pal.legs);
+    if (!pal.hindPaw) pal.hindPaw = Object.assign({}, pal.paws);
+    if (!pal.irisLeft && pal.iris) pal.irisLeft = Object.assign({}, pal.iris);
+    if (!pal.irisRight && pal.iris) pal.irisRight = Object.assign({}, pal.iris);
+    if (!pal.pupilLeft && pal.pupil) pal.pupilLeft = Object.assign({}, pal.pupil);
+    if (!pal.pupilRight && pal.pupil) pal.pupilRight = Object.assign({}, pal.pupil);
     if (!pal.earOuter) pal.earOuter = pal.points ? { ...pal.points } : { ...pal.legs };
     if (!pal.tail) pal.tail = { ...pal.earOuter };
     if (pal.points && !pal.pointsMid) {
@@ -401,7 +439,8 @@
     }
 
     const shape = { build: (raw.shape && raw.shape.build === 'sleek') ? 'sleek' : 'standard' };
-    for (const [k, [lo, hi, def]] of Object.entries(SHAPE_RANGES)) {
+    for (const [k, [, , def]] of Object.entries(SHAPE_RANGES)) {
+      const [lo, hi] = SHAPE_LIMITS[k];
       const v = raw.shape && typeof raw.shape[k] === 'number' ? raw.shape[k] : def;
       shape[k] = clamp(v, lo, hi);
     }
@@ -427,17 +466,35 @@
 
     const marks = (raw.marks || []).map((m) => {
       const baseCol = m.color ? parseHexColor(m.color) : pal.stripes;
-      const col = baseCol ? { ...baseCol } : { r: 0.2, g: 0.2, b: 0.2, a: 1 };
+      const col = baseCol ? Object.assign({}, baseCol) : { r: 0.2, g: 0.2, b: 0.2, a: 1 };
       const alpha = typeof m.alpha === 'number' ? clamp(m.alpha, 0, 1) : 1;
       col.a *= alpha;
+      const brush = VALID_BRUSHES.includes(m.brush) ? m.brush : 'round';
+      const softness = typeof m.softness === 'number' ? clamp(m.softness, 0, 1) : 0.65;
       return {
         space: m.space,
         stroke: m.kind === 'stroke',
         width: m.kind === 'stroke' ? clamp(typeof m.width === 'number' ? m.width : 2, 0.2, 24) : 0,
+        brush,
+        softness,
         color: col,
         points: m.points.map(([x, y]) => ({ x: clamp(x, -400, 400), y: clamp(y, -400, 400) }))
       };
     });
+
+    const partGradients = {};
+    if (raw.partGradients && typeof raw.partGradients === 'object') {
+      for (const sp of VALID_SPACES) {
+        const g = raw.partGradients[sp];
+        if (g && isValidHex(g.from) && isValidHex(g.to)) {
+          partGradients[sp] = {
+            from: parseHexColor(g.from),
+            to: parseHexColor(g.to),
+            stop: typeof g.stop === 'number' ? clamp(g.stop, 0.1, 0.9) : 0.5
+          };
+        }
+      }
+    }
 
     const hasPartArt = (space) =>
       regions.some((r) => r.space === space) || marks.some((m) => m.space === space);
@@ -447,8 +504,9 @@
       author: (raw.author || '').trim().slice(0, 40),
       palette: pal,
       shape,
+      partGradients,
       headSurface: raw.headSurface === 'plane' ? 'plane' : 'dome',
-      renderStyle: raw.renderStyle === 'douni' ? 'douni' : (raw.renderStyle === 'dazed' ? 'dazed' : 'standard'),
+      renderStyle: (raw.renderStyle === 'douni' || raw.renderStyle === 'dazed' || raw.renderStyle === 'damiao' || raw.renderStyle === 'naimi' || raw.renderStyle === 'beagle') ? raw.renderStyle : 'standard',
       typingStyle: raw.typingStyle === 'douni' ? 'douni' : 'standard',
       // "legs" (default): sitting front legs tinted with palette.legs; "chest": built-in coat look
       idleLegsTinted: raw.idleLegs !== 'chest',
@@ -486,20 +544,22 @@
     const shape = {};
     if (raw.shape && raw.shape.build === 'sleek') shape.build = 'sleek';
     else shape.build = 'standard';
-    for (const [k, [lo, hi, def]] of Object.entries(SHAPE_RANGES)) {
+    for (const [k, [, , def]] of Object.entries(SHAPE_RANGES)) {
+      const [lo, hi] = SHAPE_LIMITS[k];
       const v = raw.shape && typeof raw.shape[k] === 'number' ? clamp(raw.shape[k], lo, hi) : def;
       if (Math.abs(v - def) > 0.004) shape[k] = round2(v);
     }
     clean.shape = shape;
     clean.headSurface = raw.headSurface === 'plane' ? 'plane' : 'dome';
-    if (raw.renderStyle === 'douni' || raw.renderStyle === 'dazed') clean.renderStyle = raw.renderStyle;
+    if (raw.renderStyle === 'douni' || raw.renderStyle === 'dazed' || raw.renderStyle === 'damiao' || raw.renderStyle === 'naimi' || raw.renderStyle === 'beagle') clean.renderStyle = raw.renderStyle;
     if (raw.typingStyle === 'douni') clean.typingStyle = 'douni';
     if (raw.idleLegs === 'chest') clean.idleLegs = 'chest';
 
     if (raw.regions && raw.regions.length > 0) {
-      clean.regions = raw.regions.slice(0, 64).map((r) => {
+      // Unknown spaces are dropped, never re-labelled (an arm stripe must not land on the face).
+      clean.regions = raw.regions.filter((r) => r && VALID_SPACES.includes(r.space)).slice(0, 64).map((r) => {
         const out = {
-          space: VALID_SPACES.includes(r.space) ? r.space : 'body',
+          space: r.space,
           fill: isValidHex(r.fill) ? r.fill.toUpperCase() : '#FAF6EE',
           anchors: r.anchors.slice(0, 128).map((a) => {
             const pt = { x: round2(clamp(a.x, -400, 400)), y: round2(clamp(a.y, -400, 400)) };
@@ -520,17 +580,40 @@
     }
 
     if (raw.marks && raw.marks.length > 0) {
-      clean.marks = raw.marks.slice(0, 256).map((m) => {
+      clean.marks = raw.marks.filter((m) => m && VALID_SPACES.includes(m.space)).slice(0, MAX_MARKS).map((m) => {
         const out = {
-          space: VALID_SPACES.includes(m.space) ? m.space : 'head',
+          space: m.space,
           kind: m.kind === 'stroke' ? 'stroke' : 'polygon',
           color: isValidHex(m.color) ? m.color.toUpperCase() : (clean.palette.stripes || '#3A3A3A'),
           points: m.points.slice(0, 512).map(([x, y]) => [round2(clamp(x, -400, 400)), round2(clamp(y, -400, 400))])
         };
         if (typeof m.alpha === 'number' && m.alpha < 0.999) out.alpha = round2(clamp(m.alpha, 0, 1));
-        if (out.kind === 'stroke') out.width = round2(clamp(typeof m.width === 'number' ? m.width : 2.2, 0.2, 24));
+        if (out.kind === 'stroke') {
+          out.width = round2(clamp(typeof m.width === 'number' ? m.width : 2.2, 0.2, 24));
+          if (VALID_BRUSHES.includes(m.brush) && m.brush !== 'round') {
+            out.brush = m.brush;
+            if (typeof m.softness === 'number') out.softness = round2(clamp(m.softness, 0, 1));
+          }
+        }
         return out;
       });
+    }
+
+    if (raw.partGradients && typeof raw.partGradients === 'object') {
+      const pgOut = {};
+      let pgCount = 0;
+      for (const sp of VALID_SPACES) {
+        const g = raw.partGradients[sp];
+        if (g && isValidHex(g.from) && isValidHex(g.to)) {
+          pgOut[sp] = {
+            from: g.from.toUpperCase(),
+            to: g.to.toUpperCase(),
+            stop: round2(clamp(typeof g.stop === 'number' ? g.stop : 0.5, 0.1, 0.9))
+          };
+          pgCount++;
+        }
+      }
+      if (pgCount > 0) clean.partGradients = pgOut;
     }
 
     if (raw.decorations && raw.decorations.length > 0) {
@@ -549,6 +632,13 @@
 
     if (previewBase64 && typeof previewBase64 === 'string') {
       clean.preview = previewBase64;
+    }
+    const need = requiredAppVersion(clean).version;
+    clean.formatVersion = compareVersions(need, LAST_FORMAT1_APP_VERSION) > 0 ? 2 : 1;
+    if (compareVersions(need, BASE_APP_VERSION) > 0) {
+      // Keep it right after name/author in the file, where people look.
+      const { formatVersion, name, author, ...rest } = clean;
+      return Object.assign({ formatVersion, name }, author ? { author } : {}, { minAppVersion: need }, rest);
     }
     return clean;
   }
@@ -674,6 +764,29 @@
       { space: 'tail', kind: 'stroke', color: c, alpha: a, width: 3.8, points: [[52, -9], [52, 9]] },
       { space: 'tail', kind: 'stroke', color: c, alpha: a, width: 4.0, points: [[76, -9], [76, 9]] }
     ];
+  }
+
+  function makeArmRingMarks(color, alpha, count, width, sides) {
+    const c = color || '#6E4C32';
+    const a = alpha === undefined ? 0.78 : clamp(alpha, 0.1, 1);
+    const n = clamp(Math.round(count === undefined ? 3 : count), 1, 6);
+    const w = clamp(width === undefined ? 2.8 : width, 1.0, 6.0);
+    const targets = sides === 'leftArm' ? ['leftArm'] : sides === 'rightArm' ? ['rightArm'] : ['leftArm', 'rightArm'];
+    const out = [];
+    for (const sp of targets) {
+      for (let i = 0; i < n; i++) {
+        const x = n === 1 ? 44 : round2(22 + (42 * i) / (n - 1));
+        out.push({
+          space: sp,
+          kind: 'stroke',
+          color: c,
+          alpha: round2(a),
+          width: round2(w),
+          points: [[x, -11], [round2(x + 2.5), 0], [x, 11]]
+        });
+      }
+    }
+    return out;
   }
 
   // Built-in & Popular Breed Templates
@@ -860,10 +973,161 @@
     }
   ];
 
+  const BLANK_WHITE_SKIN = {
+    formatVersion: 1,
+    name: '纯白素胚小猫',
+    author: 'KuroCat 皮肤工坊',
+    palette: {
+      body: '#FAF7F1',
+      belly: '#FFFFFF',
+      legs: '#FAF7F1',
+      paws: '#FFFFFF',
+      pawPads: '#F3A6B2',
+      earOuter: '#F4EFE6',
+      earInner: '#F6C6CE',
+      nose: '#EB9CA8',
+      mouth: '#7B675E',
+      iris: '#E8B84B',
+      tail: '#F4EFE6',
+      stripes: '#5A4A42',
+      whiskers: '#9A8C80',
+      crease: '#B7AA9D'
+    },
+    shape: { build: 'standard' },
+    headSurface: 'dome',
+    regions: [],
+    marks: [],
+    decorations: []
+  };
+
+  // --- Format version, minimum app version, limits ---
+  // Every field below first worked in the desktop release named next to it (from the git history of
+  // KuroCat/shared/SkinSpec.hpp). Export writes the highest one a skin uses as `minAppVersion`; apps from 1.5.3 on
+  // refuse a skin that needs a newer app with an "upgrade" message instead of dropping fields silently.
+  // formatVersion stays 1 while the skin works on 1.5.2 (the last release that only accepts 1) and becomes 2 above
+  // that, so 1.5.2 and older also say "请先升级" rather than rejecting a field. Keep NEXT_APP_VERSION equal to the
+  // version of the desktop release that ships formatVersion 2 + the 1024-mark limit.
+  const FORMAT_VERSION_MAX = 2;
+  const BASE_APP_VERSION = '1.4.0';       // first release with .kurocat skins
+  const LAST_FORMAT1_APP_VERSION = '1.5.2';
+  const NEXT_APP_VERSION = '1.5.3';
+  const MARKS_LIMIT_V1 = 256;             // what 1.5.2 and older accept
+  const MAX_MARKS = 1024;
+  const WEB_ONLY_RENDER_STYLES = { damiao: '大喵', naimi: '奶咪' }; // drawn by the web renderer only
+
+  function compareVersions(a, b) {
+    const x = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const y = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const l = x[i] || 0, r = y[i] || 0;
+      if (l !== r) return l < r ? -1 : 1;
+    }
+    return 0;
+  }
+
+  const isVersionString = (v) => typeof v === 'string' && v.length <= 16 && /^[0-9]+(\.[0-9]+)*$/.test(v);
+
+  // -> { version, reasons: [{ version, what }], webOnly: [label] } for a raw or exported skin object.
+  function requiredAppVersion(raw) {
+    const reasons = [];
+    const need = (version, what) => reasons.push({ version, what });
+    const shape = (raw && raw.shape) || {};
+    const pal = (raw && raw.palette) || {};
+    const items = [].concat((raw && raw.regions) || [], (raw && raw.marks) || []);
+    const differs = (k) => typeof shape[k] === 'number' && SHAPE_RANGES[k] && Math.abs(shape[k] - SHAPE_RANGES[k][2]) > 1e-6;
+    const palSet = (k, fallback) => isValidHex(pal[k]) && !(isValidHex(pal[fallback]) && sameColor(parseHexColor(pal[k]), parseHexColor(pal[fallback])));
+
+    if (raw && raw.renderStyle === 'douni') need('1.4.1', '小豆泥造型');
+    if (raw && raw.typingStyle) need('1.4.1', '打字动作 typingStyle');
+    if (raw && raw.renderStyle === 'dazed') need('1.4.4', '呆猫造型');
+    if (raw && raw.renderStyle === 'beagle') need('1.5.0', '比格造型');
+    for (const k of ['earBaseWidth', 'neckWidth']) if (differs(k)) need('1.4.4', `体型 ${k}`);
+    for (const k of ['armLength', 'armRootY', 'armSpacing', 'earSpacing', 'tailRootY']) if (differs(k)) need('1.4.5', `体型 ${k}`);
+    for (const k of ['hindLegReach', 'hindLegRootX', 'hindLegRootY', 'hindLegWidth']) if (differs(k)) need('1.4.6', `体型 ${k}`);
+    if (items.some((it) => it && (it.space === 'leftArm' || it.space === 'rightArm'))) need('1.4.4', '胳膊上的花纹');
+    if (items.some((it) => it && it.space === 'hindLeg')) need('1.4.5', '后腿上的花纹');
+    for (const [k, fb] of [['headBody', 'body'], ['hindLeg', 'legs'], ['hindPaw', 'paws'], ['irisLeft', 'iris'], ['irisRight', 'iris'],
+      ['pupil', null], ['pupilLeft', 'pupil'], ['pupilRight', 'pupil']]) {
+      if (palSet(k, fb)) need('1.4.5', `颜色 ${k}`);
+    }
+    const pg = raw && raw.partGradients;
+    if (pg && typeof pg === 'object' && Object.keys(pg).length) {
+      need('1.4.5', '部位渐变 partGradients');
+      if (Object.values(pg).some((g) => g && typeof g.stop === 'number' && Math.abs(g.stop - 0.5) > 1e-6)) need('1.4.6', '渐变位置 stop');
+    }
+    if (((raw && raw.marks) || []).some((m) => m && m.brush && m.brush !== 'round')) need('1.4.8', '柔边 / 喷枪 / 涂抹笔刷');
+    if (((raw && raw.marks) || []).length > MARKS_LIMIT_V1) need(NEXT_APP_VERSION, `超过 ${MARKS_LIMIT_V1} 条花纹`);
+
+    let version = BASE_APP_VERSION;
+    for (const r of reasons) if (compareVersions(r.version, version) > 0) version = r.version;
+    const webOnly = raw && WEB_ONLY_RENDER_STYLES[raw.renderStyle] ? [WEB_ONLY_RENDER_STYLES[raw.renderStyle]] : [];
+    return { version, reasons, webOnly };
+  }
+
+  // --- Legacy `skull` space → `head` ---
+  // `skull` only follows head tilt and head movement, never the 3D turn, so a cap or forehead pattern drawn
+  // there stays put while the eyes slide sideways (up to ~13 units at full yaw). At the neutral pose
+  // (yaw = pitch = 0) both spaces map a point to the same place, so relabelling is invisible at rest.
+  // Region anchors outside the dome rim (x/46, y/40 beyond the ellipse) sit outside the head silhouette at
+  // rest; on a turn they shrink toward the centre by cos(yaw), so they are pushed out by 1/cos(max yaw) to keep
+  // the far edge from pulling inside the silhouette. Marks are clipped to the whole cat (head + body), where a
+  // point outside the rim can still be visible, so their points are only relabelled.
+  const SKULL_RIM_PUSH = 1 / Math.cos(0.5); // renderer: yaw = headYaw * 0.50, headYaw ∈ [-1, 1]
+
+  function isSkullItem(item) {
+    return !!item && item.space === 'skull';
+  }
+
+  function countSkullItems(raw) {
+    if (!raw) return 0;
+    return (raw.regions || []).filter(isSkullItem).length + (raw.marks || []).filter(isSkullItem).length;
+  }
+
+  function migrateSkullRegion(r) {
+    if (!isSkullItem(r)) return false;
+    r.space = 'head';
+    for (const a of (r.anchors || [])) {
+      if (!a || Math.hypot(a.x / 46, a.y / 40) < 1) continue;
+      for (const [kx, ky] of [['x', 'y'], ['inX', 'inY'], ['outX', 'outY']]) {
+        if (typeof a[kx] === 'number') a[kx] = round2(a[kx] * SKULL_RIM_PUSH);
+        if (typeof a[ky] === 'number') a[ky] = round2(a[ky] * SKULL_RIM_PUSH);
+      }
+    }
+    return true;
+  }
+
+  function migrateSkullMark(m) {
+    if (!isSkullItem(m)) return false;
+    m.space = 'head';
+    return true;
+  }
+
+  // Mutates `raw`; returns how many regions + marks were converted.
+  function migrateSkullToHead(raw) {
+    if (!raw) return 0;
+    let n = 0;
+    for (const r of (raw.regions || [])) if (migrateSkullRegion(r)) n++;
+    for (const m of (raw.marks || [])) if (migrateSkullMark(m)) n++;
+    return n;
+  }
+
   global.KuroSpec = {
     VALID_SPACES,
+    FORMAT_VERSION_MAX,
+    MAX_MARKS,
+    MARKS_LIMIT_V1,
+    NEXT_APP_VERSION,
+    compareVersions,
+    requiredAppVersion,
+    countSkullItems,
+    migrateSkullRegion,
+    migrateSkullMark,
+    migrateSkullToHead,
+    VALID_BRUSHES,
     PALETTE_KEYS,
     SHAPE_RANGES,
+    SHAPE_LIMITS,
+    BLANK_WHITE_SKIN,
     clamp,
     round2,
     isValidHex,
@@ -891,6 +1155,7 @@
     makePresetRegion,
     makeTabbyForeheadMarks,
     makeTailRingMarks,
+    makeArmRingMarks,
     OFFICIAL_TEMPLATES,
     EXTRA_PRESETS
   };

@@ -15,6 +15,7 @@
 #include "TabbyCoat.hpp"
 #include "../../shared/CoatPatterns.hpp"
 #include "../../shared/SkinSpec.hpp"
+#include "../../shared/Rig.hpp"
 #include "../../shared/KeyboardSkinSpec.hpp"
 #include "../../shared/BeagleAtlas.hpp"
 
@@ -223,7 +224,7 @@ public:
         float breath = physics.breathingOffset();
         float scruff = std::clamp(physics.scruffDrag.value, 0.0f, 1.0f);
         return {
-            CatPhysics::SeatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36.0f + physics.headYaw.value * 7.5f,
+            CatPhysics::SeatAnchor.x + physics.bodyShiftX.value + physics.bodyTilt.value * 36.0f + physics.headYaw.value * kurorig::HeadShiftPerYaw,
             126.0f + buildOf(skin).headLift + physics.headOffsetY.value + physics.headPitch.value * 4.8f + breath * 1.1f - scruff * 22.0f
         };
     }
@@ -261,7 +262,7 @@ public:
         const SkinShape& shape = skin.shape;
         float cx = CatPhysics::SeatAnchor.x + physics.bodyShiftX.value;
         float breath = std::sin(physics.time * 2.1f) * 1.6f;
-        Pt headCenter = { cx + physics.bodyTilt.value * 36.0f + physics.headYaw.value * 7.5f,
+        Pt headCenter = { cx + physics.bodyTilt.value * 36.0f + physics.headYaw.value * kurorig::HeadShiftPerYaw,
                           126.0f + buildOf(skin).headLift + physics.headOffsetY.value + physics.headPitch.value * 4.8f + breath * 1.1f };
 
         // Petting zones follow the reshaped head (size + cheeks) and body (width), plus Dazed Cat hood proportions.
@@ -299,6 +300,30 @@ public:
         return pt;
     }
 
+    static Pt scruffPinchCanvasPoint(const SkinSpec& skin, bool flipped, float rotationDeg) {
+        Pt pt = { 180.0f, 58.0f };
+        if (skin.renderStyle != SkinRenderStyle::Beagle) {
+            float hs = skin.shape.headScale;
+            const auto& bd = buildOf(skin);
+            pt.y = 82.0f + (hs - 1.0f) * 6.0f + bd.crownBaseY * hs - 6.2f * hs;
+        }
+        if (flipped) {
+            pt.x = CatPhysics::CanvasWidth - pt.x;
+        }
+        if (std::fabs(rotationDeg) > 0.01f) {
+            constexpr float cx = CatPhysics::CanvasWidth * 0.5f;
+            constexpr float cy = CatPhysics::CanvasHeight * 0.5f;
+            float rad = rotationDeg * (3.14159265f / 180.0f);
+            float fit = std::max(0.5f, 1.0f - std::fabs(std::sin(rad)) * 0.14f);
+            float dx = (pt.x - cx) * fit;
+            float dy = (pt.y - cy) * fit;
+            float c = std::cos(rad);
+            float s = std::sin(rad);
+            pt = { cx + dx * c - dy * s, cy + dx * s + dy * c };
+        }
+        return pt;
+    }
+
     /// Edit-mode hit test in unflipped 360x320 canvas coordinates:
     /// 20 = top rotation handle, 0..3 = corner resize handles, 12 = inside edit box, -1 = outside.
     static int hitTestEditOverlay(Pt p) {
@@ -315,9 +340,14 @@ public:
         draw(g, physics, settings, skin, KeyboardSkinSpec::builtInTheme((int)settings.keyboardTheme));
     }
 
+    // True while draw() re-enters itself to paint the seated pose underneath a fading scruff-lift pose.
+    static bool& seatedOnlyPass() { static bool v = false; return v; }
+
     static void draw(Gdiplus::Graphics& g, const CatPhysics& physics, const CatSettings& settings, const SkinSpec& skin, const KeyboardSkinSpec& kbSkin) {
         using namespace Gdiplus;
         whiteOutlineEnabled() = settings.whiteOutline;
+        Matrix baseMatrix;
+        g.GetTransform(&baseMatrix);
         g.SetSmoothingMode(SmoothingModeHighQuality);
         g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         g.SetCompositingQuality(CompositingQualityHighQuality);
@@ -399,7 +429,7 @@ public:
         float sharedSleepHead = isClassic ? (standardBuild().headLift - buildOf(skin).headLift) * lieS : 0.0f;
 
         Pt headCenter = {
-            seatX + physics.bodyTilt.value * 36.0f + physics.headYaw.value * 7.5f - lieS * 4.0f,
+            seatX + physics.bodyTilt.value * 36.0f + physics.headYaw.value * kurorig::HeadShiftPerYaw - lieS * 4.0f,
             126.0f + buildOf(skin).headLift + sharedSleepHead + physics.headOffsetY.value + physics.headPitch.value * 4.8f + breath * 1.1f - scruff * 22.0f + lieS * 60.0f
         };
 
@@ -520,7 +550,7 @@ public:
         }
 
         // 9. Floating Keycap Badges (keyboard + mouse clicks)
-        if (!physics.floatingKeycaps.empty()) {
+        if (!physics.floatingKeycaps.empty() && !seatedOnlyPass()) {
             drawFloatingKeycaps(g, physics, settings.flipHorizontal);
         }
 
@@ -683,39 +713,23 @@ private:
 
     // Head-local point -> canvas, on the skin's head surface (dome / plane) or flat skull space.
     static Gdiplus::PointF headPoint(SkinPoint p, bool skull, const SkinSpec& skin, Pt head, const CatPhysics& physics, bool whiteSurface = false) {
-        float radius = std::max(0.0f, 1.0f - (p.x * p.x) / (46.0f * 46.0f) - (p.y * p.y) / (40.0f * 40.0f));
-        float surface = whiteSurface ? (radius * radius * (3.0f - 2.0f * radius)) : std::sqrt(radius);
-        float depth = skin.headSurface == SkinHeadSurface::Dome ? 29.6f * surface : 27.5f;
-        Pt q = skull ? Pt{p.x,p.y} : projectHead3D(p.x,p.y,depth,physics.headYaw.value*0.50f,physics.headPitch.value*0.36f);
-        float hs = skin.shape.headScale;
-        q.x *= hs; q.y *= hs;
-        float c = std::cos(physics.headTilt.value), s = std::sin(physics.headTilt.value);
-        return {head.x + q.x*c - q.y*s, head.y + q.x*s + q.y*c};
+        kurorig::Vec2 q = kurorig::headPoint(p.x, p.y, skull, skin.headSurface == SkinHeadSurface::Dome, skin.shape.headScale,
+                                             physics.headYaw.value, physics.headPitch.value, physics.headTilt.value,
+                                             head.x, head.y, whiteSurface);
+        return {q.x, q.y};
     }
     static Gdiplus::PointF bodyPoint(SkinPoint p, const SkinSpec& skin, float seatX, float seatY, const CatPhysics& physics) {
-        float bw = skin.shape.bodyWidth;
-        float lie = std::clamp(physics.lieIntensity.value, 0.0f, 1.0f);
-        float lieS = lie * lie * (3.0f - 2.0f * lie);
-        float sy = physics.bodySquash.value * (1.0f - lieS * 0.42f);
-        float sx = (1.0f + (1.0f - physics.bodySquash.value) * 0.55f) * (1.0f + lieS * 0.03f);
-        float c = std::cos(physics.bodyTilt.value), s = std::sin(physics.bodyTilt.value);
-        return {seatX+p.x*bw*sx*c-p.y*sy*s, seatY+p.x*bw*sx*s+p.y*sy*c};
+        kurorig::Vec2 q = kurorig::bodyPoint(p.x, p.y, skin.shape.bodyWidth, physics.bodySquash.value, physics.lieIntensity.value,
+                                             physics.bodyTilt.value, seatX, seatY);
+        return {q.x, q.y};
     }
     static Gdiplus::PointF coatMarkPoint(CoatPoint p, bool headSurface, bool skull, CatCoatTheme coat, float seatX, float seatY, Pt head, const CatPhysics& physics, bool whiteSurface = false) {
-        if (headSurface) {
-            float radius = std::max(0.0f, 1.0f - p.x*p.x/(46.0f*46.0f) - p.y*p.y/(40.0f*40.0f));
-            float surface = whiteSurface ? radius*radius*(3.0f - 2.0f*radius) : std::sqrt(radius);
-            float depth = coat == CatCoatTheme::OrangeWhite ? 29.6f*surface : 27.5f;
-            Pt q = skull ? Pt{p.x,p.y} : projectHead3D(p.x,p.y,depth,physics.headYaw.value*0.50f,physics.headPitch.value*0.36f);
-            float c = std::cos(physics.headTilt.value), s = std::sin(physics.headTilt.value);
-            return {head.x + q.x*c - q.y*s, head.y + q.x*s + q.y*c};
-        }
-        float lie = std::clamp(physics.lieIntensity.value, 0.0f, 1.0f);
-        float lieS = lie * lie * (3.0f - 2.0f * lie);
-        float sy = physics.bodySquash.value * (1.0f - lieS * 0.42f);
-        float sx = (1.0f + (1.0f - physics.bodySquash.value) * 0.55f) * (1.0f + lieS * 0.03f);
-        float c = std::cos(physics.bodyTilt.value), s = std::sin(physics.bodyTilt.value);
-        return {seatX+p.x*sx*c-p.y*sy*s, seatY+p.x*sx*s+p.y*sy*c};
+        // Built-in coats: orange-white sits on the dome, the others on the plane; no head scale or body width.
+        kurorig::Vec2 q = headSurface
+            ? kurorig::headPoint(p.x, p.y, skull, coat == CatCoatTheme::OrangeWhite, 1.0f, physics.headYaw.value, physics.headPitch.value,
+                                 physics.headTilt.value, head.x, head.y, whiteSurface)
+            : kurorig::bodyPoint(p.x, p.y, 1.0f, physics.bodySquash.value, physics.lieIntensity.value, physics.bodyTilt.value, seatX, seatY);
+        return {q.x, q.y};
     }
     static void drawCoatMarks(Gdiplus::Graphics& g, float seatX, float seatY, Pt head, const CatPhysics& physics, CatCoatTheme coat) {
         using namespace Gdiplus;
@@ -851,7 +865,7 @@ private:
             const auto& px = airbrushStampPixels(mark.color);
             Bitmap stampBmp(64, 64, 64 * 4, PixelFormat32bppPARGB, const_cast<BYTE*>(px.data()));
             GraphicsState st = g.Save();
-            g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+            g.SetInterpolationMode(InterpolationModeBilinear);
             g.SetPixelOffsetMode(PixelOffsetModeHalf);
             auto stamp = [&](float x, float y) {
                 g.DrawImage(&stampBmp, RectF(x - drawR, y - drawR, drawR * 2.0f, drawR * 2.0f),
@@ -1030,12 +1044,8 @@ private:
     }
 
     static Pt projectHead3D(float x, float y, float z, float yawRad, float pitchRad) {
-        float cy = std::cos(yawRad), sy = std::sin(yawRad);
-        float x1 = x * cy + z * sy;
-        float z1 = -x * sy + z * cy;
-        float cp = std::cos(pitchRad), sp = std::sin(pitchRad);
-        float y2 = y * cp + z1 * sp;
-        return { x1, y2 };
+        kurorig::Vec2 q = kurorig::projectHead3D(x, y, z, yawRad, pitchRad);
+        return { q.x, q.y };
     }
 
     static Pt quadPoint(Pt p0, Pt p1, Pt p2, float t) {
@@ -1700,8 +1710,8 @@ private:
         g.RotateTransform(physics.headTilt.value * RadToDeg);
         if (skin.shape.headScale != 1.0f) g.ScaleTransform(skin.shape.headScale, skin.shape.headScale);
 
-        float yawRad = physics.headYaw.value * 0.50f;
-        float pitchRad = physics.headPitch.value * 0.36f;
+        float yawRad = physics.headYaw.value * kurorig::YawPerUnit;
+        float pitchRad = physics.headPitch.value * kurorig::PitchPerUnit;
         float fold = physics.earFold.value;
         float twitch = physics.earTwitch.value * 0.045f;
 
@@ -2400,8 +2410,8 @@ private:
         g.RotateTransform(physics.headTilt.value * RadToDeg);
         if (skin.shape.headScale != 1.0f) g.ScaleTransform(skin.shape.headScale, skin.shape.headScale);
 
-        float yawRad = physics.headYaw.value * 0.50f;
-        float pitchRad = physics.headPitch.value * 0.36f;
+        float yawRad = physics.headYaw.value * kurorig::YawPerUnit;
+        float pitchRad = physics.headPitch.value * kurorig::PitchPerUnit;
 
         if (isDazed(skin)) {
             drawDazedFace(g, physics, eyeTheme, yawRad, pitchRad, skin, scruffStartle, scruffWide);
@@ -3002,7 +3012,7 @@ private:
     static void drawDecorations(Gdiplus::Graphics& g, float seatX, float seatY, Pt head, const CatPhysics& physics, const SkinSpec& skin,
                                 const Pt* neckOverride = nullptr, const Pt* tailTipOverride = nullptr, int anchorMask = 0xF) {
         using namespace Gdiplus;
-        float yawRad = physics.headYaw.value * 0.50f, pitchRad = physics.headPitch.value * 0.36f;
+        float yawRad = physics.headYaw.value * kurorig::YawPerUnit, pitchRad = physics.headPitch.value * kurorig::PitchPerUnit;
         for (const SkinDecoration& d : skin.decorations) {
             if ((anchorMask & anchorBit(d.anchor)) == 0) continue;
             Bitmap* img = decorationBitmap(d);
@@ -6454,8 +6464,8 @@ private:
         }
     }
 
-    // MARK: - Universal Front-Facing Long-Cat Scruff-Lifted Drag Pose (ALL Non-Douni Skins!)
-
+    // Port of the macOS drawNativeScruffDragCat (Sources/CatRenderer.swift): pendulum-driven hang from the pinched
+    // nape, back rising smoothly into the pinched skin, ears in front of the nape, head repainted over the ear bases.
     static void drawNativeScruffDragCat(
         Gdiplus::Graphics& g,
         const CatPhysics& physics,
@@ -6738,20 +6748,51 @@ private:
                     Color cols[2] = { Color(255, 227, 201, 159), Color(255, 200, 167, 122) };
                     REAL locs[2] = { 0.0f, 1.0f };
                     fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 2);
+                } else if (isTabby(skin)) {
+                    Pt ctrl = { (limb.root.x + limb.tip.x) * 0.5f + limb.bendX * 0.5f, (limb.root.y + limb.tip.y) * 0.5f };
+                    RectF pawRect(limb.tip.x - geo.r1 * 0.9f, limb.tip.y - geo.r1 * 0.45f, geo.r1 * 1.8f, geo.r1 * 1.35f);
+                    GraphicsState ts = lg.Save();
+                    lg.SetClip(&fillP, CombineModeIntersect);
+                    tabby::drawLimb(lg, fillP, pawRect, limb.root, ctrl, limb.tip, limb.startW, limb.endW);
+                    lg.Restore(ts);
                 } else if (skin.colorpoint()) {
                     const SkinColor& midC = pal.pointsMid.set ? pal.pointsMid : pal.legs;
-                    Color cols[4] = { col(pal.body), col(pal.body), col(midC), col(pal.paws) };
-                    REAL locs[4] = { 0.0f, 0.20f, 0.54f, 0.88f };
-                    fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 4);
+                    const SkinColor& pointC = pal.points.set ? pal.points : pal.paws;
+                    if (pointC.sameAs(pal.paws)) {
+                        Color cols[4] = { withAlpha(pal.body, 0), col(pal.body), col(midC), col(pal.paws) };
+                        REAL locs[4] = { 0.0f, 0.16f, 0.48f, 0.78f };
+                        fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 4);
+                    } else {
+                        Color cols[5] = { withAlpha(pal.body, 0), col(pal.body), col(midC), col(pointC), col(pal.paws) };
+                        REAL locs[5] = { 0.0f, 0.16f, 0.46f, 0.72f, 0.88f };
+                        fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 5);
+                    }
                 } else if (auto pgIt = skin.partGradients.find(limbKey); pgIt != skin.partGradients.end()) {
                     fillPartGradient(lg, &fillP, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), pgIt->second);
-                } else if (!limb.isBehindBody && !pal.legs.sameAs(pal.body)) {
-                    Color cols[4] = { col(pal.body), col(pal.body), col(pal.legs), col(pal.paws) };
-                    REAL locs[4] = { 0.0f, 0.14f, 0.42f, 0.82f };
-                    fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 4);
+                } else if (!limb.isBehindBody) {
+                    const SkinColor& legC = pal.legs;
+                    const SkinColor& pawC = pal.paws;
+                    if (pal.belly.set && !pal.belly.sameAs(legC)) {
+                        if (!pawC.sameAs(legC)) {
+                            Color cols[4] = { col(pal.belly), col(legC), col(legC), col(pawC) };
+                            REAL locs[4] = { 0.0f, 0.30f, 0.68f, 0.84f };
+                            fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 4);
+                        } else {
+                            Color cols[2] = { col(pal.belly), col(legC) };
+                            REAL locs[2] = { 0.0f, 0.30f };
+                            fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 2);
+                        }
+                    } else if (!pawC.sameAs(legC)) {
+                        Color cols[3] = { col(legC), col(legC), col(pawC) };
+                        REAL locs[3] = { 0.0f, 0.68f, 0.84f };
+                        fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 3);
+                    } else {
+                        SolidBrush legBrush(col(legC));
+                        lg.FillPath(&legBrush, &fillP);
+                    }
                 } else {
-                    const SkinColor& legC = limb.isBehindBody && pal.hindLeg.set ? pal.hindLeg : pal.legs;
-                    const SkinColor& pawC = limb.isBehindBody && pal.hindPaw.set ? pal.hindPaw : pal.paws;
+                    const SkinColor& legC = pal.hindLeg.set ? pal.hindLeg : pal.legs;
+                    const SkinColor& pawC = pal.hindPaw.set ? pal.hindPaw : pal.paws;
                     Color cols[2] = { col(legC), col(pawC) };
                     REAL locs[2] = { 0.22f, 0.75f };
                     fillClampedLinearGradient(lg, &fillP, nullptr, PointF(limb.root.x, limb.root.y), PointF(limb.tip.x, limb.tip.y), cols, locs, 2);
@@ -6863,10 +6904,15 @@ private:
                         }
                     }
                     if (!isDazed && pal.tailTip.set) {
-                        Pen tipPen(col(pal.tailTip), tailW * 0.92f);
+                        // Tail tip = last 22% of the tail curve (de Casteljau split at t = 0.78, same as drawTail's
+                        // idle tip). A straight chord only touches the curve at the tip and cuts across the bend, so the
+                        // colour ended up outside the silhouette on the convex side and left fur showing on the inside.
+                        const float tipT = 0.78f;
+                        Pt ta = lerpPt(tailRoot, tailC1, tipT), tb = lerpPt(tailC1, tailC2, tipT), tq = lerpPt(tailC2, tailTip, tipT);
+                        Pt td = lerpPt(ta, tb, tipT), te = lerpPt(tb, tq, tipT), ts = lerpPt(td, te, tipT);
+                        Pen tipPen(col(pal.tailTip), tailW);
                         setRound(tipPen);
-                        Pt tStart = lerpPt(tailC2, tailTip, 0.35f);
-                        lg.DrawLine(&tipPen, tStart.x, tStart.y, tailTip.x, tailTip.y);
+                        lg.DrawBezier(&tipPen, PointF(ts.x, ts.y), PointF(te.x, te.y), PointF(tq.x, tq.y), PointF(tailTip.x, tailTip.y));
                     }
                 }
             }
@@ -7138,6 +7184,9 @@ private:
                 Pt dragNeck = { headCenter.x + hipLagX * 0.08f, headCenter.y + 36.0f * hs };
                 drawDecorations(lg, rumpCenterX, torsoBottomY, headCenter, physics, skin, &dragNeck, &tailTip,
                                 anchorBit(SkinAnchorPoint::HeadTop) | anchorBit(SkinAnchorPoint::Face) | anchorBit(SkinAnchorPoint::Neck));
+            }
+            if (physics.musicIntensity > 0.01f) {
+                drawMusicHeadphones(lg, headCenter, physics, eyeTheme, skin);
             }
             lg.Restore(pState);
         });

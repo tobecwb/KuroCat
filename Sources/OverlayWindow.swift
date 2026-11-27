@@ -22,9 +22,10 @@ private struct RenderedPose {
         let keyboardSkinId: String
         let showsLegends: Bool
         let levelKeyboard: Bool
+        let marqueeMode: Int
         let captureMode: Int
         let showEditControls: Bool
-        let englishLabels: Bool
+        let labelLanguage: String
     }
 
     let appearance: Appearance
@@ -96,9 +97,10 @@ private struct RenderedPose {
             keyboardSkinId: settings.activeKeyboardSkin.id,
             showsLegends: settings.showKeyLegends,
             levelKeyboard: settings.levelKeyboard,
+            marqueeMode: settings.marqueeMode.rawValue,
             captureMode: settings.obsCaptureMode,
             showEditControls: settings.isEditMode,
-            englishLabels: settings.isEnglish
+            labelLanguage: settings.language
         )
 
         let scruff = physics.scruffDrag.value
@@ -270,6 +272,8 @@ final class CatCanvasView: NSView {
     private var resizeStartFrame: CGRect = .zero
     private var dragStartScreenPt: CGPoint = .zero
     private var dragStartWindowOrigin: CGPoint = .zero
+    private var dragScruffAnchorDelta: CGPoint = .zero
+    private var lastDragScreenPt: CGPoint = .zero
     private var activeCursor: ActiveCursor = .arrow
     private var lastHoverWasInside = false
     private var lastDrawnPose: RenderedPose?
@@ -420,6 +424,9 @@ final class CatCanvasView: NSView {
         if isDraggingOrResizing {
             if win.ignoresMouseEvents {
                 win.ignoresMouseEvents = false
+            }
+            if isDragging {
+                syncDraggedWindowPosition(win: win)
             }
             return
         }
@@ -578,9 +585,35 @@ final class CatCanvasView: NSView {
 
         isDragging = true
         dragStartScreenPt = screenPt
+        lastDragScreenPt = screenPt
         dragStartWindowOrigin = win.frame.origin
+        dragScruffAnchorDelta = computeScruffAnchorDelta(window: win, cursorScreenPt: screenPt)
         physics.setDragging(true, dragDx: 0)
         setCursorIfNeeded(.closedHand)
+    }
+
+    private func computeScruffAnchorDelta(window win: NSWindow, cursorScreenPt screenPt: CGPoint) -> CGPoint {
+        let s = CatSettings.shared
+        guard s.enableDragAnimation else { return .zero }
+        let pinchCanvas = CatRenderer.scruffPinchCanvasPoint(skin: s.activeSkin, flipped: s.flipHorizontal, rotationDeg: s.rotationDeg)
+        let scale = win.frame.width / CatPhysics.canvasSize.width
+        let pinchOffsetX = pinchCanvas.x * scale
+        let pinchOffsetY = win.frame.height - (pinchCanvas.y + CatCanvasView.contentTopInset) * scale
+        return CGPoint(
+            x: (screenPt.x - pinchOffsetX) - win.frame.origin.x,
+            y: (screenPt.y - pinchOffsetY) - win.frame.origin.y
+        )
+    }
+
+    private func syncDraggedWindowPosition(win: NSWindow) {
+        let currentScreenPt = NSEvent.mouseLocation
+        let t = max(0, min(1, physics.scruffDrag.value))
+        let ease = t * t * (3.0 - 2.0 * t)
+        let newOrigin = CGPoint(
+            x: dragStartWindowOrigin.x + (currentScreenPt.x - dragStartScreenPt.x) + dragScruffAnchorDelta.x * ease,
+            y: dragStartWindowOrigin.y + (currentScreenPt.y - dragStartScreenPt.y) + dragScruffAnchorDelta.y * ease
+        )
+        win.setFrameOrigin(newOrigin)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -591,6 +624,8 @@ final class CatCanvasView: NSView {
             if hypot(currentScreenPt.x - doubleClickDownScreenPt.x, currentScreenPt.y - doubleClickDownScreenPt.y) >= 4.0 {
                 pendingDoubleClickToggle = false
                 isDragging = true
+                lastDragScreenPt = currentScreenPt
+                dragScruffAnchorDelta = computeScruffAnchorDelta(window: win, cursorScreenPt: dragStartScreenPt)
                 physics.setDragging(true, dragDx: 0)
                 setCursorIfNeeded(.closedHand)
             } else {
@@ -636,20 +671,15 @@ final class CatCanvasView: NSView {
             return
         }
         guard isDragging else { return }
-        let prevX = win.frame.origin.x
-        let prevY = win.frame.origin.y
-        let newOrigin = CGPoint(
-            x: dragStartWindowOrigin.x + (currentScreenPt.x - dragStartScreenPt.x),
-            y: dragStartWindowOrigin.y + (currentScreenPt.y - dragStartScreenPt.y)
-        )
-        let rawDx = newOrigin.x - prevX
-        let rawDy = -(newOrigin.y - prevY)
+        let rawDx = currentScreenPt.x - lastDragScreenPt.x
+        let rawDy = -(currentScreenPt.y - lastDragScreenPt.y)
+        lastDragScreenPt = currentScreenPt
         // Transform world drag velocity into cat-local orientation so trailing inertia matches world motion at any angle!
         let rad = -CatSettings.shared.rotationDeg * .pi / 180.0
         let localDx = rawDx * cos(rad) - rawDy * sin(rad)
         let localDy = rawDx * sin(rad) + rawDy * cos(rad)
         physics.setDragging(true, dragDx: CatSettings.shared.flipHorizontal ? -localDx : localDx, dragDy: localDy)
-        win.setFrameOrigin(newOrigin)
+        syncDraggedWindowPosition(win: win)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -680,6 +710,7 @@ final class CatCanvasView: NSView {
         }
         guard isDragging else { return }
         isDragging = false
+        dragScruffAnchorDelta = .zero
         physics.setDragging(false)
         setCursorIfNeeded(.openHand)
         // Save position immediately so restarts always preserve exact coordinates
@@ -1561,6 +1592,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var mouseBadgesSwitch: KuroSwitchControl?
     private var legendsSwitch: KuroSwitchControl?
     private var marqueeSwitch: KuroSwitchControl?
+    private var marqueeModePopup: NSPopUpButton!
     private var levelKeyboardSwitch: KuroSwitchControl?
     private var fullscreenOverlaySwitch: KuroSwitchControl?
     private var clickThroughSwitch: KuroSwitchControl?
@@ -1615,6 +1647,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         obsPopup = nil; langSeg = nil
         whiteOutlineSwitch = nil; flipSwitch = nil; angerSwitch = nil; dragAnimSwitch = nil
         badgesSwitch = nil; mouseBadgesSwitch = nil; legendsSwitch = nil; marqueeSwitch = nil
+        marqueeModePopup = nil
         levelKeyboardSwitch = nil; fullscreenOverlaySwitch = nil; clickThroughSwitch = nil
         autoHideSwitch = nil; autoHeadphonesSwitch = nil; obsHideSwitch = nil
         autoStartSwitch = nil; hourlySwitch = nil
@@ -1893,7 +1926,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 card.addSubview(makeBtn(tr("重置位置", "Reset", "Redefinir"), variant: .secondary, action: #selector(onTapResetPose), frame: NSRect(x: 386, y: r7 + 8, width: 78, height: 24)))
             }
         } else if activeTab == 1 {
-            addCard(rows: 9) { card, rh in
+            addCard(rows: 10) { card, rh in
                 card.addSubview(makeLabel(tr("拎起拖拽动画", "Scruff-Drag Lift Animation", "Animação de erguer ao arrastar"), yPos: 3, width: 360))
                 let dragSw = makeSwitch(s.enableDragAnimation, action: #selector(onToggleDragAnim), yPos: 3)
                 card.addSubview(dragSw); dragAnimSwitch = dragSw
@@ -1946,14 +1979,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 addRowDivider(card, yPos: r6 + rh)
 
                 let r7 = 3 + rh * 7
-                card.addSubview(makeLabel(tr("键盘水平摆放", "Level Keyboard", "Teclado nivelado"), yPos: r7, width: 360))
-                let lvlSw = makeSwitch(s.levelKeyboard, action: #selector(onToggleLevelKeyboard), yPos: r7)
-                card.addSubview(lvlSw); levelKeyboardSwitch = lvlSw
+                card.addSubview(makeLabel(tr("跑马灯模式", "Marquee Mode", "Modo do letreiro"), yPos: r7, width: 120))
+                let mmP = NSPopUpButton(frame: NSRect(x: 144, y: r7 + 8, width: 320, height: 24), pullsDown: false)
+                mmP.addItems(withTitles: Self.marqueeModeTitles())
+                mmP.selectItem(at: KeyboardMarqueeMode.allCases.firstIndex(of: s.marqueeMode) ?? 0)
+                mmP.target = self
+                mmP.action = #selector(onMarqueeModeSelected)
+                mmP.isEnabled = s.keyboardMarquee
+                card.addSubview(mmP); marqueeModePopup = mmP
                 addRowDivider(card, yPos: r7 + rh)
 
                 let r8 = 3 + rh * 8
-                card.addSubview(makeLabel(tr("数位板与触控笔", "Tablet & Stylus", "Mesa e caneta"), yPos: r8, width: 120))
-                let tabP = NSPopUpButton(frame: NSRect(x: 144, y: r8 + 8, width: 320, height: 24), pullsDown: false)
+                card.addSubview(makeLabel(tr("键盘水平摆放", "Level Keyboard", "Teclado nivelado"), yPos: r8, width: 360))
+                let lvlSw = makeSwitch(s.levelKeyboard, action: #selector(onToggleLevelKeyboard), yPos: r8)
+                card.addSubview(lvlSw); levelKeyboardSwitch = lvlSw
+                addRowDivider(card, yPos: r8 + rh)
+
+                let r9 = 3 + rh * 9
+                card.addSubview(makeLabel(tr("数位板与触控笔", "Tablet & Stylus", "Mesa e caneta"), yPos: r9, width: 120))
+                let tabP = NSPopUpButton(frame: NSRect(x: 144, y: r9 + 8, width: 320, height: 24), pullsDown: false)
                 tabP.addItems(withTitles: [
                     tr("自动检测", "Auto-Detect", "Detectar automaticamente"),
                     tr("始终显示数位板", "Always Show Tablet", "Sempre mostrar mesa digitalizadora"),
@@ -2251,7 +2295,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func onToggleMarquee() {
         CatSettings.shared.keyboardMarquee = (marqueeSwitch?.isOn == true)
+        marqueeModePopup?.isEnabled = CatSettings.shared.keyboardMarquee
         onSettingsChanged?()
+    }
+
+    @objc private func onMarqueeModeSelected() {
+        let modes = KeyboardMarqueeMode.allCases
+        let idx = max(0, min(modes.count - 1, marqueeModePopup.indexOfSelectedItem))
+        CatSettings.shared.marqueeMode = modes[idx]
+        onSettingsChanged?()
+    }
+
+    /// Titles for the marquee mode popup, in `KeyboardMarqueeMode.allCases` order.
+    private static func marqueeModeTitles() -> [String] {
+        let zh = ["循环播放全部（自动轮换）", "单向扫描（左 → 右，原版）", "循环环绕（无缝衔接）", "涟漪扩散（中心向两侧）"]
+        let en = ["Cycle All (Auto-Rotate)", "Single Sweep (Left → Right)", "Loop Wrap (Seamless)", "Ripple (Centre → Edges)"]
+        let pt = ["Alternar todos (automático)", "Varredura (esquerda → direita, original)", "Circular (contínuo)", "Ondulação (do centro para as bordas)"]
+        return KeyboardMarqueeMode.allCases.indices.map { i in loc(zh[i], en[i], pt[i]) }
     }
 
     @objc private func onToggleLevelKeyboard() {

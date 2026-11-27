@@ -1,4 +1,4 @@
-# `.kurocat` 皮肤格式 · formatVersion 1
+# `.kurocat` 皮肤格式 · formatVersion 1 / 2
 
 KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘、眼睛会眨），所以皮肤不是贴图，而是一份**数据**：
 部位颜色 + 曲线分区 + 矢量花纹 + 体型参数 + 跟随部位的贴纸。三端（macOS / Windows / Linux）用同一份
@@ -9,8 +9,11 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
   - **数字会被夹到合法范围**（例如 `bodyWidth: 9` 按 `1.35` 处理）；
   - **未知字段一律忽略**（方便以后加字段，旧版本照样能读）；
   - **类型错误、颜色写错、缺必填项、JSON 语法错误 → 整个文件拒绝导入**，并给出中文原因；
-  - `formatVersion` 大于 1 → 拒绝，提示“请先升级 KuroCat”。
-- 参考实现：`shared/SkinSpec.hpp`（C++，Windows/Linux）与 `Sources/SkinSpec.swift`（macOS）。
+  - `formatVersion` 大于本版本支持的值 → 拒绝，提示“请先升级 KuroCat”；`minAppVersion` 比正在运行的 KuroCat 新 → 同样拒绝并提示升级（1.5.3 起，见 §1.1）。
+- 参考实现：`shared/SkinSpec.hpp`（C++，Windows/Linux）、`Sources/CatPhysics.swift` 末尾的 `SkinSpec`（macOS）、
+  `KuroCat-Workshop/spec.js`（网页；`homepage/pet/spec.js` 是它的原样拷贝，用 `scripts/sync-web-spec.sh` 同步）。
+- 部位坐标怎么映射到画布（转头角度、球面尺寸、身体压扁）只写在 `shared/rig.json` 一处，各端由 `scripts/gen-rig.py`
+  生成常数；`bash scripts/check-rig.sh` 检查各端映射与规则是否一致（CI 的 macOS 任务会跑）。
 - 模板：`skins/black.kurocat`、`skins/siamese.kurocat`、`skins/shorthair.kurocat`、`skins/orangeWhite.kurocat`
   （四款内置毛色，由 `scripts/generate-coat-patterns.py` 生成）；示例：`skins/samples/curve-regions-demo.kurocat`。
 
@@ -18,19 +21,46 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `formatVersion` | 整数 | ✔ | 固定为 `1` |
+| `formatVersion` | 整数 | ✔ | `1` 或 `2`，见 §1.1 |
+| `minAppVersion` | 字符串 |  | 至少需要哪个版本的 KuroCat，如 `"1.4.8"`；皮肤工坊导出时自动计算，见 §1.1 |
 | `name` | 字符串 | ✔ | 皮肤名，显示在「猫咪皮肤」菜单里；去掉首尾空白后不能为空，超过 40 字截断 |
 | `author` | 字符串 |  | 作者，超过 40 字截断 |
 | `palette` | 对象 | ✔ | 部位颜色，见 §3 |
 | `regions` | 数组 |  | 曲线分区（钢笔工具画出来的色块），≤ 64 个，见 §4 |
-| `marks` | 数组 |  | 矢量花纹（多边形 / 描边），≤ 256 条，见 §5 |
+| `marks` | 数组 |  | 矢量花纹（多边形 / 描边），≤ 1024 条（1.5.2 及更早 ≤ 256），见 §5 |
 | `shape` | 对象 |  | 体型参数，见 §6 |
 | `headSurface` | `"dome"` \| `"plane"` |  | 头部花纹贴在哪种曲面上转动，默认 `"dome"`，见 §2.2 |
 | `idleLegs` | `"legs"` \| `"chest"` |  | 坐着时两条前腿的画法：`"legs"`（缺省）用 `palette.legs` 从肩膀往下渐显；`"chest"` 保持胸口颜色、只画爪子和腿缝线（四款内置毛色和模板用它） |
 | `decorations` | 数组 |  | 贴纸（PNG），≤ 8 个，见 §7 |
+| `partGradients` | 对象 |  | 按部位的渐变底色，键为 `body` / `head` / `tail` / `leftArm` / `rightArm` / `hindLeg`，值为 `{ "from": "#…", "to": "#…", "angle": 0, "stop": 0.5 }`（`from`/`to` 也可写 `start`/`end`；`angle` −360…360 度；`stop` 0.1…0.9 是中点位置） |
+| `renderStyle` | 字符串 |  | 整只猫换成特殊造型：`"douni"`（小豆泥）、`"dazed"`（呆猫）、`"beagle"`（比格）；其他值按普通小猫画。网页另有 `"damiao"`、`"naimi"` 两种，**桌宠还不支持**，导入后显示成普通小猫 |
+| `typingStyle` | 字符串 |  | 打字动作：`"douni"` 为小豆泥式拍键盘，缺省为普通 |
 | `preview` | 字符串 |  | base64 PNG 预览图（≤ 512 KB），给网页/图库用，桌宠本身不显示 |
 
 颜色一律写成 `"#RRGGBB"` 或 `"#RRGGBBAA"`（AA 为不透明度，`FF` = 不透明）。
+
+### 1.1 版本：`formatVersion` 与 `minAppVersion`
+
+字段是一版一版加进来的，旧版桌宠遇到不认识的字段会**忽略**（画出来和网页不一样），遇到不认识的部位名会**整份拒绝**。
+为了让用户看到的永远是“请先升级”而不是一句看不懂的错误：
+
+- 皮肤工坊导出时，按皮肤**实际用到**的功能算出 `minAppVersion`（只有用到 1.4.0 之后的功能时才写）：
+
+  | 从这个版本起 | 功能 |
+  |---|---|
+  | 1.4.0 | `.kurocat` 皮肤本身、`idleLegs` |
+  | 1.4.1 | `renderStyle: "douni"`、`typingStyle` |
+  | 1.4.4 | `renderStyle: "dazed"`、`leftArm` / `rightArm` 部位、`shape.earBaseWidth` / `neckWidth` |
+  | 1.4.5 | `hindLeg` 部位、`partGradients`、`palette.headBody` / `hindLeg` / `hindPaw` / `irisLeft` / `irisRight` / `pupil` / `pupilLeft` / `pupilRight`、`shape.armLength` / `armRootY` / `armSpacing` / `earSpacing` / `tailRootY` |
+  | 1.4.6 | `partGradients.*.stop`、`shape.hindLegReach` / `hindLegRootX` / `hindLegRootY` / `hindLegWidth` |
+  | 1.4.8 | 花纹笔刷 `brush`（`soft` / `airbrush` / `smudge`）与 `softness` |
+  | 1.5.0 | `renderStyle: "beagle"` |
+  | 1.5.3 | 超过 256 条 `marks`（上限 1024） |
+
+  体型参数只有**偏离缺省值**时才算“用到”；颜色只有和它的后备色（如 `hindLeg` 之于 `legs`）不同才算。
+- `minAppVersion` 高于 1.5.2 时写 `formatVersion: 2`，否则写 `1`。1.5.2 及更早只认 1，所以会直接提示升级；
+  1.5.3 起认 1 和 2，并在 `minAppVersion` 比自己新时拒绝、提示升级。
+- 规则写在 `KuroCat-Workshop/spec.js` 的 `requiredAppVersion()`；**新加一个皮肤字段时，同时在那里登记它的首发版本**，并更新上表。
 
 ## 2. 坐标系（部位空间）
 
@@ -64,9 +94,11 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 |---|---|---|---|
 | `body` | 坐垫锚点 `(184, 226)`；x 右、y 下 | 剪影约 `x∈[-52,52]`，`y∈[-100,17]`（`y=-14` 是胯部最宽处，`y=12` 是坐着的底边） | 身体倾斜、压扁回弹（呼吸/打字时的 squash），`shape.bodyWidth` 乘在 x 上 |
 | `head` | 头部中心；x 右、y 下 | 脸 `x∈[-46,46]`，`y∈[-38,30]`；眼睛中心 `(±17.2,-2)`，胡须根 `(±24, 10…18)` | 头的左右转（yaw）、抬低头（pitch）、歪头（tilt）+ `shape.headScale` |
-| `skull` | 同 `head` | 同 `head` | **只**跟随歪头和头部位移，不做 3D 转动（适合后脑勺、头顶这类“转头时不该滑走”的大色块） |
+| `skull` | 同 `head` | 同 `head` | **只**跟随歪头和头部位移，**不做 3D 转动**。头顶、额头、刘海、眼罩都应该画在 `head`——画在 `skull` 上的花纹转头时不动，眼睛会从花纹里滑出去。皮肤工坊已不再提供这个部位，打开含 `skull` 的旧皮肤会提示一键改为 `head`（正脸外观不变） |
 | `tail` | x = 沿尾巴中线的位置，`0` 尾根 → `100` 尾尖；y = 垂直偏移 | 尾巴半宽 = `5.5 × shape.tailThickness`，所以 `y∈[-5.5,5.5]` 就盖满尾巴 | 摇尾巴、捕猎时压低；`shape.tailLength` / `tailThickness`（y 会随粗细一起缩放） |
 | `leftEar` / `rightEar` | 耳朵自己的框：`(-50,0)` 内侧耳根，`(50,0)` 外侧耳根，`(0,-100)` 耳尖 | 两只耳朵**自动镜像**（x 总是“由内向外”） | 转头、折耳、抖耳朵、`shape.earSize` / `earPointiness` |
+| `leftArm` / `rightArm` | x = 沿胳膊中线，`0` 肩膀 → `100` 爪尖；y = 横向，`±10` 是胳膊两侧边缘 | `y∈[-10,10]` 盖满胳膊 | 打字、拍键盘时胳膊怎么弯，花纹就怎么弯；两条胳膊的 y 方向互为镜像 |
+| `hindLeg` | 同胳膊：x `0` 胯部 → `100` 后爪；y `±10` 是两侧边缘 | 同上 | 踢键盘的那条后腿 |
 
 尾巴的 y 方向：沿着尾巴从根走向尖时，`y > 0` 在行进方向的右手边（静止时尾根一段朝右伸，`y>0` 就是下侧）。
 
@@ -114,6 +146,10 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 | `earInner` | 耳朵内侧 | 无（不画） |
 | `nose` / `mouth` | 鼻子 / “ω”嘴 | 无（不画） |
 | `iris` | 虹膜；设置后**覆盖**菜单里选的眼睛颜色 | 无（用菜单里的眼睛颜色） |
+| `irisLeft` / `irisRight` | 左 / 右眼虹膜（异瞳）| `iris` |
+| `pupil` / `pupilLeft` / `pupilRight` | 瞳孔颜色 | 无（深色瞳孔） |
+| `headBody` | 头部底色；与 `body` 不同时沿下颌线（§2.3）分开 | `body` |
+| `hindLeg` / `hindPaw` | 踢键盘那条后腿 / 后爪 | `legs` / `paws` |
 | `tail` | 尾巴 | `earOuter` |
 | `tailTip` | 尾巴最后 22%（t ∈ [0.78, 1] 那一段） | 无 |
 | `stripes` | 没写 `color` 的 `marks` 用这个颜色 | 无 |
@@ -143,7 +179,7 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 }
 ```
 
-- `space`：`head` / `skull` / `body` / `tail` / `leftEar` / `rightEar`（§2）。
+- `space`：`head` / `skull` / `body` / `tail` / `leftEar` / `rightEar` / `leftArm` / `rightArm` / `hindLeg`（§2）。
 - `fill`：填充色；`alpha`（0–1，缺省 1）再乘到 `fill` 的不透明度上。
 - `anchors`：2–128 个锚点。`x,y` 是锚点，`inX,inY` / `outX,outY` 是**进入 / 离开**手柄的**绝对坐标**（同一部位空间）。
   省略手柄 = 手柄与锚点重合（尖角）。锚点 *i* 到 *i+1* 的一段是
@@ -165,6 +201,7 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
   描边两端是圆头；`tail` 空间的描边是**平头**（它们是绕尾巴一圈的色带，内置花纹猫的两道尾环就是这样画的）。
 - `color` 缺省时用 `palette.stripes`（两者都没有则拒绝）；`alpha` 0–1 乘到颜色上。
 - `points`：≤ 512 个 `[x, y]`，坐标夹到 `[-400, 400]`。
+- 描边可加 `brush`：`"round"`（缺省）、`"soft"`（柔边）、`"airbrush"`（喷枪）、`"smudge"`（涂抹），柔和程度 `softness` 0–1（缺省 0.65）。1.4.8 起支持。
 - `head` / `skull` / `body` 的花纹裁剪到整个猫剪影，`tail` / 耳朵的裁剪到各自部位（§2.3）。
 
 ## 6. `shape` —— 体型
@@ -183,6 +220,18 @@ KuroCat 的猫是**实时绘制的矢量**（头会转、爪子会去够键盘�
 | `tailLength` | 0.70 – 1.30 | 1 | 尾巴长度（绕尾根缩放） |
 | `tailThickness` | 0.70 – 1.50 | 1 | 尾巴粗细 |
 | `pawStagger` | 0 – 1 | 1 | 右后爪比左后爪低多少（1 = 小黑猫那种一高一低，0 = 对称） |
+| `neckWidth` | 0.65 – 1.40 | 1 | 脖子粗细 |
+| `earBaseWidth` | 0.65 – 1.40 | 1 | 耳根宽度 |
+| `earSpacing` | 0.60 – 1.50 | 1 | 两耳间距 |
+| `tailRootY` | −30 – 30 | 0 | 尾根上下位置 |
+| `armSpacing` | 0.50 – 1.60 | 1 | 两条前腿的间距 |
+| `armRootY` | −30 – 30 | 0 | 前腿根部上下位置 |
+| `armLength` | 0.60 – 1.50 | 1 | 前腿长度 |
+| `hindLegRootX` / `hindLegRootY` | −24 – 24 | 0 | 后腿根部位置 |
+| `hindLegWidth` | 0.60 – 1.60 | 1 | 后腿粗细 |
+| `hindLegReach` | 0.65 – 1.50 | 1 | 后腿伸多远 |
+
+（皮肤工坊的滑块范围可能更窄；读文件时一律按上表夹取，三端和网页一致，`tests/rig/rules_test.mjs` 会检查。）
 
 ## 7. `decorations` —— 贴纸
 

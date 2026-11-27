@@ -29,7 +29,9 @@ using std::max;
 #include <vector>
 #include <unordered_set>
 #include <cmath>
+#include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -66,7 +68,7 @@ inline const wchar_t* trW(const wchar_t* zh, const wchar_t* en, const wchar_t* p
 
 namespace {
 
-constexpr const wchar_t* APP_VERSION = L"1.5.2";
+constexpr const wchar_t* APP_VERSION = L"1.5.4";
 constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray owner window so newer builds can take over older ones
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
@@ -206,6 +208,7 @@ struct RenderedPoseSnapshot {
     int breath100 = 0, blink100 = 0, sleep100 = 0;
     int tail10 = 0, purr100 = 0, happy100 = 0;
     int sparkleCount = 0, zzzCount = 0, noteCount = 0;
+    int music100 = 0, musicPhase20 = 0, marquee20 = 0;
 
     bool operator==(const RenderedPoseSnapshot& o) const {
         return w == o.w && h == o.h &&
@@ -223,7 +226,8 @@ struct RenderedPoseSnapshot {
                leftPawY10 == o.leftPawY10 && rightPawY10 == o.rightPawY10 && thirdPawY10 == o.thirdPawY10 &&
                breath100 == o.breath100 && blink100 == o.blink100 && sleep100 == o.sleep100 &&
                tail10 == o.tail10 && purr100 == o.purr100 && happy100 == o.happy100 &&
-               sparkleCount == o.sparkleCount && zzzCount == o.zzzCount && noteCount == o.noteCount;
+               sparkleCount == o.sparkleCount && zzzCount == o.zzzCount && noteCount == o.noteCount &&
+               music100 == o.music100 && musicPhase20 == o.musicPhase20 && marquee20 == o.marquee20;
     }
 };
 
@@ -245,13 +249,19 @@ struct AppState {
     HWND settingsWnd = nullptr;     // unified native Settings window (nullptr when closed)
     HFONT settingsFont = nullptr;
     HFONT settingsBoldFont = nullptr;
+    HFONT settingsTitleFont = nullptr;
+    HFONT settingsSubFont = nullptr;
     HBRUSH settingsBgBrush = nullptr;
     bool settingsDark = false;
     bool settingsUpdating = false;
+    int settingsTab = 0;            // 0 = Appearance, 1 = Interaction, 2 = System
+    float settingsScale = 1.0f;
+    std::vector<HWND> settingsTabCtrls[3];
 
     bool isVisible = true;
     bool hiddenByFullscreen = false;
     bool isDragging = false;
+    int dragMouseButton = 0; // 1 = primary (WM_LBUTTONDOWN), 2 = secondary (WM_RBUTTONDOWN when SM_SWAPBUTTON)
     int activeResizeCorner = -1; // -1 = none, 0=TL, 1=TR, 2=BL, 3=BR
     POINT resizeAnchorScreenPt = {};
     bool isRotating = false;
@@ -259,12 +269,16 @@ struct AppState {
     float rotateStartAngle = 0.0f;
     float rotateStartDeg = 0.0f;
     bool rButtonDown = false;
+    POINT rButtonDownCursor = {};
     bool pendingMenuAfterAlt = false;
     double pendingMenuAltUpTime = 0.0;
     POINT pendingMenuPt = {};
     bool inContextMenu = false;
     POINT dragStartCursor = {};
     POINT dragStartWinOrigin = {};
+    POINT lastDragCursor = {};
+    float dragScruffDeltaX = 0.0f;
+    float dragScruffDeltaY = 0.0f;
     bool hasLastHover = false;
     Pt lastHoverCanvas = {};
     std::string statsDay;
@@ -822,10 +836,15 @@ void startInAppUpdate(AppState& app) {
     }
 }
 
-const wchar_t* trayTipText() {
-    return trW(L"KuroCat 黑猫键盘桌宠 (右键/左键打开菜单)",
-               L"KuroCat Keyboard Cat (click to open the menu)",
-               L"KuroCat – gatinho do teclado (clique para abrir o menu)");
+void fillTrayTipText(const AppState& app, wchar_t* buf, size_t cap) {
+    const wchar_t* tip = app.isVisible
+        ? trW(L"KuroCat 黑猫键盘桌宠 (右键/左键打开菜单)",
+              L"KuroCat Desktop Pet (Click to open menu)",
+              L"KuroCat – gatinho do teclado (clique para abrir o menu)")
+        : trW(L"KuroCat 黑猫桌宠 (已隐藏 · 点击托盘图标恢复显示)",
+              L"KuroCat (Hidden - Click tray icon to show)",
+              L"KuroCat (oculto — clique no ícone da bandeja para mostrar)");
+    wcsncpy_s(buf, cap, tip, _TRUNCATE);
 }
 
 void registerTrayIcon(AppState& app) {
@@ -837,8 +856,37 @@ void registerTrayIcon(AppState& app) {
     app.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     app.nid.uCallbackMessage = WM_TRAYICON;
     app.nid.hIcon = app.trayIcon;
-    wcscpy_s(app.nid.szTip, trayTipText());
-    Shell_NotifyIconW(NIM_ADD, &app.nid);
+    fillTrayTipText(app, app.nid.szTip, sizeof(app.nid.szTip) / sizeof(app.nid.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_ADD, &app.nid)) {
+        Shell_NotifyIconW(NIM_MODIFY, &app.nid);
+    }
+}
+
+void updateTrayTip(AppState& app) {
+    if (!app.nid.hWnd || !IsWindow(app.nid.hWnd)) return;
+    NOTIFYICONDATAW tipNid = app.nid;
+    tipNid.uFlags = NIF_TIP;
+    fillTrayTipText(app, tipNid.szTip, sizeof(tipNid.szTip) / sizeof(tipNid.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_MODIFY, &tipNid)) {
+        registerTrayIcon(app);
+    } else {
+        wcscpy_s(app.nid.szTip, tipNid.szTip);
+    }
+}
+
+void ensureTrayIcon(AppState& app) {
+    if (!app.nid.hWnd || !IsWindow(app.nid.hWnd)) {
+        registerTrayIcon(app);
+        return;
+    }
+    NOTIFYICONDATAW mod = app.nid;
+    mod.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    fillTrayTipText(app, mod.szTip, sizeof(mod.szTip) / sizeof(mod.szTip[0]));
+    if (!Shell_NotifyIconW(NIM_MODIFY, &mod)) {
+        registerTrayIcon(app);
+    } else {
+        wcscpy_s(app.nid.szTip, mod.szTip);
+    }
 }
 
 HICON createCatTrayIcon() {
@@ -935,6 +983,30 @@ void assertTopmost(AppState& app) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
 }
 
+void setPetVisible(AppState& app, bool visible, bool showHintBalloon = false) {
+    app.isVisible = visible;
+    app.hiddenByFullscreen = false;
+    if (app.hwnd && IsWindow(app.hwnd)) {
+        ShowWindow(app.hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+        if (visible) {
+            double now = nowSeconds();
+            app.lastTickTime = now;
+            app.lastRenderTime = now;
+            app.nextFrameTime = now;
+            app.forceRedraw = true;
+            assertTopmost(app);
+        }
+    }
+    ensureTrayIcon(app);
+    if (!visible && showHintBalloon) {
+        showTrayBalloon(app,
+            trW(L"KuroCat \u5DF2\u9690\u85CF\u5230\u7CFB\u7EDF\u6258\u76D8", L"KuroCat is hidden in the system tray", L"O KuroCat está oculto na bandeja do sistema"),
+            trW(L"\u70B9\u51FB\u53F3\u4E0B\u89D2\u6258\u76D8\uFF08\u6216 ^ \u6298\u53E0\u533A\u57DF\uFF09\u4E2D\u7684\u5C0F\u732B\u56FE\u6807\u5373\u53EF\u91CD\u65B0\u663E\u793A\u684C\u5BA0\u3002",
+                L"Click the KuroCat tray icon (check ^ hidden icons) to show the pet again.",
+                L"Clique no ícone do KuroCat na bandeja (veja em ^ ícones ocultos) para mostrar o gatinho de novo."));
+    }
+}
+
 void demoteTopmostForUpdateDialog(AppState& app) {
     if (app.hwnd && IsWindow(app.hwnd) && (GetWindowLongPtrW(app.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
         SetWindowPos(app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -975,6 +1047,8 @@ void recoverAfterSystemEvent(AppState& app) {
     app.destroyBuffer();
     app.ulwFailures = 0;
     app.isDragging = false;
+    app.dragMouseButton = 0;
+    app.rButtonDown = false;
     app.lastTickTime = now;
     app.nextFrameTime = 0.0;
     app.lastRenderTime = now;
@@ -985,13 +1059,52 @@ void recoverAfterSystemEvent(AppState& app) {
     app.pendingTopmostTime = now + 1.5; // some games re-assert topmost shortly after a mode switch
 }
 
+static std::wstring queryProcessBaseNameLower(DWORD pid) {
+    if (pid == 0) return L"";
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return L"";
+    std::wstring res;
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD sz = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (QueryFullProcessImageNameW(hProc, 0, path, &sz) && sz > 0) {
+        const wchar_t* base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        res = base;
+        for (wchar_t& ch : res) ch = (wchar_t)towlower(ch);
+    }
+    CloseHandle(hProc);
+    return res;
+}
+
+static bool isKnownMediaOrBrowserProcess(const std::wstring& procName) {
+    if (procName.empty()) return false;
+    static const wchar_t* kApps[] = {
+        L"cloudmusic.exe", L"qqmusic.exe", L"spotify.exe", L"kugou.exe",
+        L"kwmusic.exe", L"kuwomusic.exe", L"sodamusic.exe", L"qishui.exe",
+        L"applemusic.exe", L"itunes.exe", L"foobar2000.exe", L"musicbee.exe",
+        L"aimp.exe", L"lx-music-desktop.exe", L"yesplaymusic.exe", L"cider.exe",
+        L"potplayermini64.exe", L"potplayermini.exe", L"vlc.exe", L"mpv.exe",
+        L"mpc-hc64.exe", L"mpc-be64.exe", L"wmplayer.exe", L"microsoft.media.player.exe",
+        L"tidal.exe", L"youtube music.exe", L"bilibili.exe", L"listen1.exe",
+        L"zyplayer.exe", L"kodi.exe", L"audacious.exe",
+        L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe",
+        L"opera.exe", L"opera_gx.exe", L"vivaldi.exe", L"arc.exe"
+    };
+    for (const wchar_t* appName : kApps) {
+        if (procName == appName) return true;
+    }
+    return false;
+}
+
 /// Returns true when any active audio output endpoint (speakers, 3.5mm/USB/Bluetooth headphones)
 /// currently has a non-system application outputting audible audio (videos, browsers, Apple Music,
 /// music players, etc.). Uses WASAPI endpoint enumeration + AudioSessionState + IAudioMeterInformation,
-/// with a safe fallback for Win11 Bluetooth A2DP / hardware-offloaded endpoints whose GetPeakValue()
-/// reports 0.0f while audio is actively playing.
+/// checking both session-level and endpoint-level meters (fixes browsers / hardware-offloaded /
+/// spatial audio streams whose session peak reports 0.0f while endpoint peak > 0) plus a safe
+/// per-session fallback for Win11 Bluetooth A2DP / offload endpoints whose meters stay at 0.0f.
 static bool isSystemAudioPlaying() {
-    static std::unordered_set<std::wstring> s_meterWorkingDevices;
+    static std::unordered_set<std::wstring> s_sessionMeterWorkingKeys;
+    static std::unordered_set<std::wstring> s_epMeterWorkingDevices;
 
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
@@ -1077,9 +1190,11 @@ static bool isSystemAudioPlaying() {
                     AudioSessionState st = AudioSessionStateInactive;
                     if (SUCCEEDED(ctrl->GetState(&st)) && st == AudioSessionStateActive) {
                         bool isSystemSound = false;
+                        DWORD sessionPid = 0;
                         IAudioSessionControl2* ctrl2 = nullptr;
                         if (SUCCEEDED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2)) && ctrl2) {
                             if (ctrl2->IsSystemSoundsSession() == S_OK) isSystemSound = true;
+                            ctrl2->GetProcessId(&sessionPid);
                             ctrl2->Release();
                         }
                         bool sessionMuted = false;
@@ -1093,6 +1208,10 @@ static bool isSystemAudioPlaying() {
                             sVol->Release();
                         }
                         if (!isSystemSound && !sessionMuted && sessionVolume > 0.001f) {
+                            std::wstring procName = queryProcessBaseNameLower(sessionPid);
+                            std::wstring sessionKey = devId + L"|"
+                                + (!procName.empty() ? procName
+                                    : (sessionPid != 0 ? (L"pid:" + std::to_wstring(sessionPid)) : L"sys"));
                             float sPeak = 0.0f;
                             bool hasSessionPeak = false;
                             IAudioMeterInformation* sMeter = nullptr;
@@ -1102,15 +1221,28 @@ static bool isSystemAudioPlaying() {
                                 }
                                 sMeter->Release();
                             }
-                            if (hasSessionPeak && sPeak > 0.0008f) {
-                                if (!devId.empty()) s_meterWorkingDevices.insert(devId);
+                            if (hasSessionPeak && sPeak > 0.0001f) {
+                                if (!devId.empty()) {
+                                    if (s_sessionMeterWorkingKeys.size() > 256) s_sessionMeterWorkingKeys.clear();
+                                    s_sessionMeterWorkingKeys.insert(sessionKey);
+                                }
                                 found = true;
-                            } else if (hasEpMeter && epPeak > 0.001f && !hasSessionPeak) {
+                            } else if (hasEpMeter && epPeak > 0.00015f) {
+                                // Some browser / spatial / hardware-offloaded sessions report sPeak == 0.0f
+                                // while the endpoint meter itself clearly reports audible playback.
+                                if (!devId.empty()) {
+                                    if (s_epMeterWorkingDevices.size() > 256) s_epMeterWorkingDevices.clear();
+                                    s_epMeterWorkingDevices.insert(devId);
+                                }
                                 found = true;
                             } else if (!hasEpMeter || epMeterChannels == 0 || !hasSessionPeak ||
-                                       devId.empty() || s_meterWorkingDevices.find(devId) == s_meterWorkingDevices.end()) {
-                                // Endpoint meter has never reported non-zero session peaks (e.g. Win11 Bluetooth A2DP
-                                // / hardware-offloaded stream) or metering is unavailable: trust active unmuted session.
+                                       devId.empty() ||
+                                       (s_sessionMeterWorkingKeys.find(sessionKey) == s_sessionMeterWorkingKeys.end() &&
+                                        s_epMeterWorkingDevices.find(devId) == s_epMeterWorkingDevices.end())) {
+                                // Metering has never reported non-zero peaks for this session/endpoint
+                                // (e.g. Win11 BT A2DP, hardware offload, or exclusive mode): trust active session.
+                                found = true;
+                            } else if (isKnownMediaOrBrowserProcess(procName) && hasEpMeter && epPeak > 0.00005f) {
                                 found = true;
                             }
                         }
@@ -1136,10 +1268,15 @@ void housekeeping(AppState& app) {
     if (!app.hwnd) return;
 
     // Read background WASAPI polling result without blocking the UI thread
+    bool prevMusic = app.physics.isMusicPlaying;
     app.audioPollingEnabled.store(app.settings.autoHeadphonesOnMusic, std::memory_order_relaxed);
     app.physics.isMusicPlaying = app.settings.autoHeadphonesOnMusic
         ? app.audioSustainedPlaying.load(std::memory_order_relaxed)
         : false;
+    if (app.physics.isMusicPlaying != prevMusic) {
+        app.forceRedraw = true;
+        app.nextFrameTime = std::min(app.nextFrameTime, now);
+    }
 
     bool fullscreenFg = isForegroundFullscreen(app.hwnd);
     bool obsBg = (app.settings.obsCaptureMode > 0 && app.settings.obsHideDesktop);
@@ -1674,6 +1811,7 @@ LRESULT CALLBACK dressingRoomProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->dressingRoom == hwnd) app->dressingRoom = nullptr;
             return 0;
@@ -1795,30 +1933,54 @@ bool promptRenameSkin(AppState& app, const std::string& id) {
     RenameDialogState st;
     st.value = utf8ToWide(s->name);
 
-    int w = 360, h = 150;
+    // Layout is authored in 96-dpi design units and scaled by the system DPI. A fixed 360x150 window
+    // left less client height than the caption + button row need at 125/150/200 % scaling, so the
+    // Save/Cancel row was clipped by the bottom edge (app.manifest is PerMonitorV2).
+    HDC screenDc = GetDC(nullptr);
+    float scale = GetDeviceCaps(screenDc, LOGPIXELSY) / 96.0f;
+    ReleaseDC(nullptr, screenDc);
+    auto px = [scale](int v) { return (int)std::lround(v * scale); };
+    const int clientW = px(360), clientH = px(124);   // label + edit + button row + bottom margin
+    const DWORD dlgStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    const DWORD dlgExStyle = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME;
+    RECT frame = {0, 0, clientW, clientH};
+    AdjustWindowRectEx(&frame, dlgStyle, FALSE, dlgExStyle);   // rough size; corrected below
+    int w = frame.right - frame.left, h = frame.bottom - frame.top;
     int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
     HWND dlg = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
+        dlgExStyle,
         clsName,
-        tr(L"重命名皮肤", L"Rename Skin", L"Renomear skin"),
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        trW(L"重命名皮肤", L"Rename Skin", L"Renomear skin"),
+        dlgStyle,
         sx, sy, w, h,
         app.settingsWnd ? app.settingsWnd : app.menuOwnerHwnd,
         nullptr, inst, &st
     );
     if (!dlg) return false;
+    {
+        // AdjustWindowRectEx ignores the monitor DPI, so the caption + frame can be taller than it
+        // assumed and eat the client area. Measure what we actually got and grow to fit.
+        RECT cr = {}, wr = {};
+        GetClientRect(dlg, &cr);
+        GetWindowRect(dlg, &wr);
+        int addW = std::max(0, clientW - (int)cr.right), addH = std::max(0, clientH - (int)cr.bottom);
+        int ww = (wr.right - wr.left) + addW, wh = (wr.bottom - wr.top) + addH;
+        SetWindowPos(dlg, nullptr, (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2,
+                     ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(dlg, SW_SHOWNORMAL);
+    }
 
     HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HWND lbl = CreateWindowExW(0, L"STATIC",
-        tr(L"请输入新的皮肤名称（最多 40 字）：", L"Enter a new skin name (max 40 chars):", L"Novo nome da skin (máx. 40 caracteres):"),
-        WS_CHILD | WS_VISIBLE, 18, 16, 316, 20, dlg, nullptr, inst, nullptr);
+        trW(L"请输入新的皮肤名称（最多 40 字）：", L"Enter a new skin name (max 40 chars):", L"Novo nome da skin (máx. 40 caracteres):"),
+        WS_CHILD | WS_VISIBLE, px(18), px(16), px(316), px(20), dlg, nullptr, inst, nullptr);
     st.editHwnd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st.value.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 18, 42, 316, 24, dlg, (HMENU)1001, inst, nullptr);
-    HWND okBtn = CreateWindowExW(0, L"BUTTON", tr(L"保存", L"Save", L"Salvar"),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 174, 80, 76, 26, dlg, (HMENU)IDOK, inst, nullptr);
-    HWND cancelBtn = CreateWindowExW(0, L"BUTTON", tr(L"取消", L"Cancel", L"Cancelar"),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 258, 80, 76, 26, dlg, (HMENU)IDCANCEL, inst, nullptr);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, px(18), px(42), px(316), px(26), dlg, (HMENU)1001, inst, nullptr);
+    HWND okBtn = CreateWindowExW(0, L"BUTTON", trW(L"保存", L"Save", L"Salvar"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, px(174), px(80), px(76), px(26), dlg, (HMENU)IDOK, inst, nullptr);
+    HWND cancelBtn = CreateWindowExW(0, L"BUTTON", trW(L"取消", L"Cancel", L"Cancelar"),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, px(258), px(80), px(76), px(26), dlg, (HMENU)IDCANCEL, inst, nullptr);
     for (HWND c : {lbl, st.editHwnd, okBtn, cancelBtn}) SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(st.editHwnd, EM_SETLIMITTEXT, 40, 0);
     SendMessageW(st.editHwnd, EM_SETSEL, 0, -1);
@@ -2133,7 +2295,11 @@ enum CtrlId : int {
     ID_SKINS_DIR_PATH,
     ID_BTN_CHOOSE_SKINS_DIR,
     ID_BTN_OPEN_SKINS_DIR,
-    ID_BTN_RESET_SKINS_DIR
+    ID_BTN_RESET_SKINS_DIR,
+    ID_TAB_0,
+    ID_TAB_1,
+    ID_TAB_2,
+    ID_HEADER_SUB
 };
 
 bool isWindowsDarkMode() {
@@ -2188,13 +2354,31 @@ void rebuildCombosAndSync(AppState& app) {
         }
         SendMessageW(coatCb, CB_SETCURSEL, (WPARAM)sel, 0);
         bool hasCustom = !app.settings.customSkin.empty() && app.skins.find(app.settings.customSkin) != nullptr;
-        if (HWND hRen = GetDlgItem(hwnd, ID_BTN_RENAME_SKIN)) EnableWindow(hRen, hasCustom ? TRUE : FALSE);
+        if (HWND hRen = GetDlgItem(hwnd, ID_BTN_RENAME_SKIN)) {
+            EnableWindow(hRen, hasCustom ? TRUE : FALSE);
+            InvalidateRect(hRen, nullptr, TRUE);
+        }
         if (HWND hDel = GetDlgItem(hwnd, ID_BTN_DEL_SKIN)) {
             EnableWindow(hDel, hasCustom ? TRUE : FALSE);
             InvalidateRect(hDel, nullptr, TRUE);
         }
         if (HWND hBatch = GetDlgItem(hwnd, ID_BTN_BATCH_DEL_SKIN)) {
-            EnableWindow(hBatch, !app.skins.skins.empty() ? TRUE : FALSE);
+            size_t cnt = app.skins.skins.size();
+            std::wstring bt = cnt > 0
+                ? (std::wstring(trW(L"\u6279\u91CF\u5220\u9664\u76AE\u80A4 (", L"Batch Delete (", L"Excluir várias (")) + std::to_wstring(cnt) + L")")
+                : std::wstring(tr(L"\u6279\u91CF\u5220\u9664\u76AE\u80A4", L"Batch Delete", L"Excluir várias"));
+            SetWindowTextW(hBatch, bt.c_str());
+            EnableWindow(hBatch, cnt > 0 ? TRUE : FALSE);
+            InvalidateRect(hBatch, nullptr, TRUE);
+        }
+        if (HWND hSub = GetDlgItem(hwnd, ID_HEADER_SUB)) {
+            std::wstring activeName = utf8ToWide(activeSkin(app).name);
+            size_t cnt = app.skins.skins.size();
+            std::wstring sub = cnt > 0
+                ? (std::wstring(trW(L"\u5F53\u524D\u76AE\u80A4\uFF1A", L"Active: ", L"Em uso: ")) + activeName + L" \u00B7 "
+                   + trW(L"\u5DF2\u5BFC\u5165 ", L"", L"") + std::to_wstring(cnt) + trW(L" \u6B3E", L" imported", L" importada(s)"))
+                : (std::wstring(trW(L"\u5F53\u524D\u76AE\u80A4\uFF1A", L"Active: ", L"Em uso: ")) + activeName);
+            SetWindowTextW(hSub, sub.c_str());
         }
     }
 
@@ -2285,6 +2469,7 @@ void rebuildCombosAndSync(AppState& app) {
     }
     if (HWND hResetDir = GetDlgItem(hwnd, ID_BTN_RESET_SKINS_DIR)) {
         EnableWindow(hResetDir, SkinLibrary::isUsingCustomDir() ? TRUE : FALSE);
+        InvalidateRect(hResetDir, nullptr, TRUE);
     }
 
     app.settingsUpdating = false;
@@ -2383,10 +2568,7 @@ void applyUiLanguage(AppState& app, int lang) {
     kurocat::setUiLanguage(static_cast<kurocat::UiLanguage>(lang));
     app.settings.saveToRegistry();
 
-    wcscpy_s(app.nid.szTip, trayTipText());
-    NOTIFYICONDATAW tip = app.nid;
-    tip.uFlags = NIF_TIP;
-    Shell_NotifyIconW(NIM_MODIFY, &tip);
+    updateTrayTip(app);
 
     if (app.dressingRoom) {
         SetWindowTextW(app.dressingRoom, trW(L"换装间", L"Dressing Room", L"Provador"));
@@ -2412,6 +2594,35 @@ void applySkinsDirectory(AppState& app, const std::wstring& dirW) {
     refreshSettingsWindow(app);
 }
 
+void switchSettingsTab(AppState& app, int tab) {
+    app.settingsTab = std::clamp(tab, 0, 2);
+    for (int t = 0; t < 3; ++t) {
+        int cmd = (t == app.settingsTab) ? SW_SHOW : SW_HIDE;
+        for (HWND c : app.settingsTabCtrls[t]) {
+            if (c && IsWindow(c)) ShowWindow(c, cmd);
+        }
+    }
+    if (app.settingsWnd && IsWindow(app.settingsWnd)) {
+        for (int id : { settings_ui::ID_TAB_0, settings_ui::ID_TAB_1, settings_ui::ID_TAB_2 }) {
+            if (HWND tb = GetDlgItem(app.settingsWnd, id)) InvalidateRect(tb, nullptr, TRUE);
+        }
+        InvalidateRect(app.settingsWnd, nullptr, TRUE);
+    }
+}
+
+static void addGdipRoundedRect(Gdiplus::GraphicsPath& path, float x, float y, float w, float h, float r) {
+    float d = std::min(r * 2.0f, std::min(w, h));
+    if (d <= 0.5f) {
+        path.AddRectangle(Gdiplus::RectF(x, y, w, h));
+        return;
+    }
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
 LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     AppState* app = g_app;
     switch (msg) {
@@ -2423,12 +2634,82 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return TRUE;
             }
             break;
+        case WM_PAINT: {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (app) {
+                float k = app->settingsScale > 0.1f ? app->settingsScale : 1.0f;
+                auto px = [&](float v) { return v * k; };
+                bool dk = app->settingsDark;
+                RECT crc = {};
+                GetClientRect(hwnd, &crc);
+                float cw = (float)(crc.right - crc.left);
+                float ch = (float)(crc.bottom - crc.top);
+
+                Gdiplus::Graphics g(hdc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+                // 1. Subtle version pill (top-right, no logo)
+                {
+                    float pw = px(54), ph = px(20);
+                    float rx = cw - px(20) - pw, ry = px(14);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, rx, ry, pw, ph, px(6));
+                    Gdiplus::SolidBrush br(dk ? Gdiplus::Color(255, 42, 42, 46) : Gdiplus::Color(255, 244, 244, 246));
+                    g.FillPath(&br, &p);
+                    RECT trc = { (LONG)rx, (LONG)ry, (LONG)(rx + pw), (LONG)(ry + ph) };
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, dk ? RGB(152, 152, 159) : RGB(110, 110, 115));
+                    HGDIOBJ oldF = app->settingsSubFont ? SelectObject(hdc, app->settingsSubFont) : nullptr;
+                    std::wstring verTxt = std::wstring(L"v") + APP_VERSION;
+                    DrawTextW(hdc, verTxt.c_str(), -1, &trc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    if (oldF) SelectObject(hdc, oldF);
+                }
+
+                // 2. Segmented 3-Tab track
+                {
+                    float tx = px(20), ty = px(62), tw = cw - px(40), th = px(32);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, tx, ty, tw, th, px(9));
+                    Gdiplus::SolidBrush br(dk ? Gdiplus::Color(255, 42, 42, 46) : Gdiplus::Color(255, 244, 244, 246));
+                    g.FillPath(&br, &p);
+                }
+
+                // 3. Clean white content card with hairline border
+                {
+                    float cx = px(20), cy = px(106), cardW = cw - px(40), cardH = ch - px(106) - px(58);
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, cx + 0.5f, cy + 0.5f, cardW - 1.0f, cardH - 1.0f, px(10));
+                    Gdiplus::SolidBrush fill(dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                    Gdiplus::Pen border(dk ? Gdiplus::Color(255, 54, 54, 60) : Gdiplus::Color(255, 230, 230, 235), 1.0f);
+                    g.FillPath(&fill, &p);
+                    g.DrawPath(&border, &p);
+                }
+
+                // 4. Footer hairline divider
+                {
+                    float fy = ch - px(50);
+                    Gdiplus::Pen divPen(dk ? Gdiplus::Color(255, 45, 45, 50) : Gdiplus::Color(255, 240, 240, 243), 1.0f);
+                    g.DrawLine(&divPen, px(20), fy, cw - px(20), fy);
+                }
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             if (app && app->settingsBgBrush) {
                 HDC hdc = (HDC)wParam;
+                HWND ctl = (HWND)lParam;
+                int cid = ctl ? GetDlgCtrlID(ctl) : 0;
+                bool isMuted = (cid == settings_ui::ID_HEADER_SUB || cid == settings_ui::ID_SKINS_DIR_PATH
+                             || cid == settings_ui::ID_SCALE_VAL || cid == settings_ui::ID_ROT_VAL);
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, app->settingsDark ? RGB(236, 238, 242) : RGB(28, 30, 34));
+                if (isMuted) {
+                    SetTextColor(hdc, app->settingsDark ? RGB(152, 152, 159) : RGB(110, 110, 115));
+                } else {
+                    SetTextColor(hdc, app->settingsDark ? RGB(245, 245, 247) : RGB(19, 19, 22));
+                }
                 return (LRESULT)app->settingsBgBrush;
             }
             break;
@@ -2473,26 +2754,101 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         case WM_DRAWITEM: {
             auto* dis = (DRAWITEMSTRUCT*)lParam;
-            if (dis && dis->CtlID == settings_ui::ID_BTN_DEL_SKIN) {
+            if (dis && app) {
+                using namespace settings_ui;
+                int cid = (int)dis->CtlID;
+                bool dk = app->settingsDark;
                 bool disabled = (dis->itemState & ODS_DISABLED) != 0;
                 bool pressed = (dis->itemState & ODS_SELECTED) != 0;
-                COLORREF bgCol = disabled ? RGB(224, 224, 224) : (pressed ? RGB(175, 35, 35) : RGB(217, 56, 56));
-                COLORREF txtCol = disabled ? RGB(145, 145, 145) : RGB(255, 255, 255);
-                HBRUSH br = CreateSolidBrush(bgCol);
-                FillRect(dis->hDC, &dis->rcItem, br);
-                DeleteObject(br);
-                HPEN pen = CreatePen(PS_SOLID, 1, disabled ? RGB(195, 195, 195) : RGB(165, 30, 30));
-                HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
-                HGDIOBJ oldBr = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-                Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
-                SelectObject(dis->hDC, oldPen);
-                SelectObject(dis->hDC, oldBr);
-                DeleteObject(pen);
+                float k = app->settingsScale > 0.1f ? app->settingsScale : 1.0f;
+
+                RECT r = dis->rcItem;
+                float w = (float)(r.right - r.left);
+                float h = (float)(r.bottom - r.top);
+
+                // Clear item background first
+                bool isTab = (cid == ID_TAB_0 || cid == ID_TAB_1 || cid == ID_TAB_2);
+                COLORREF outerBg = isTab
+                    ? (dk ? RGB(42, 42, 46) : RGB(244, 244, 246))
+                    : (dk ? RGB(24, 24, 26) : RGB(255, 255, 255));
+                HBRUSH clearBr = CreateSolidBrush(outerBg);
+                FillRect(dis->hDC, &r, clearBr);
+                DeleteObject(clearBr);
+
+                Gdiplus::Graphics g(dis->hDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+                COLORREF txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                bool useBold = false;
+
+                if (isTab) {
+                    int tabIdx = (cid == ID_TAB_0) ? 0 : ((cid == ID_TAB_1) ? 1 : 2);
+                    bool active = (app->settingsTab == tabIdx);
+                    if (active) {
+                        Gdiplus::GraphicsPath p;
+                        addGdipRoundedRect(p, (float)r.left + 0.5f, (float)r.top + 0.5f, w - 1.0f, h - 1.0f, 6.5f * k);
+                        Gdiplus::SolidBrush fill(dk ? Gdiplus::Color(255, 60, 60, 66) : Gdiplus::Color(255, 255, 255, 255));
+                        Gdiplus::Pen border(dk ? Gdiplus::Color(255, 72, 72, 80) : Gdiplus::Color(220, 226, 226, 232), 1.0f);
+                        g.FillPath(&fill, &p);
+                        g.DrawPath(&border, &p);
+                        txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                        useBold = true;
+                    } else {
+                        txtCol = dk ? RGB(152, 152, 159) : RGB(110, 110, 115);
+                    }
+                } else {
+                    bool isPrimary = (cid == ID_BTN_DRESSING);
+                    bool isDanger = (cid == ID_BTN_DEL_SKIN || cid == ID_BTN_BATCH_DEL_SKIN);
+                    Gdiplus::Color fillCol;
+                    Gdiplus::Color strokeCol(0, 0, 0, 0);
+                    bool hasStroke = true;
+
+                    if (disabled) {
+                        fillCol = dk ? Gdiplus::Color(255, 36, 36, 40) : Gdiplus::Color(255, 246, 246, 248);
+                        strokeCol = dk ? Gdiplus::Color(255, 50, 50, 56) : Gdiplus::Color(255, 232, 232, 237);
+                        txtCol = dk ? RGB(100, 100, 108) : RGB(170, 170, 178);
+                    } else if (isPrimary) {
+                        hasStroke = false;
+                        if (dk) {
+                            fillCol = pressed ? Gdiplus::Color(255, 210, 210, 216) : Gdiplus::Color(255, 240, 240, 243);
+                            txtCol = RGB(19, 19, 22);
+                        } else {
+                            fillCol = pressed ? Gdiplus::Color(255, 50, 50, 55) : Gdiplus::Color(255, 24, 24, 27);
+                            txtCol = RGB(255, 255, 255);
+                        }
+                        useBold = true;
+                    } else if (isDanger) {
+                        fillCol = pressed
+                            ? (dk ? Gdiplus::Color(255, 76, 32, 34) : Gdiplus::Color(255, 254, 226, 226))
+                            : (dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                        strokeCol = dk ? Gdiplus::Color(110, 239, 68, 68) : Gdiplus::Color(95, 220, 38, 38);
+                        txtCol = dk ? RGB(239, 68, 68) : RGB(220, 38, 38);
+                    } else {
+                        fillCol = pressed
+                            ? (dk ? Gdiplus::Color(255, 54, 54, 60) : Gdiplus::Color(255, 234, 234, 239))
+                            : (dk ? Gdiplus::Color(255, 32, 32, 35) : Gdiplus::Color(255, 255, 255, 255));
+                        strokeCol = dk ? Gdiplus::Color(255, 58, 58, 66) : Gdiplus::Color(255, 228, 228, 234);
+                        txtCol = dk ? RGB(245, 245, 247) : RGB(19, 19, 22);
+                    }
+
+                    Gdiplus::GraphicsPath p;
+                    addGdipRoundedRect(p, (float)r.left + 0.5f, (float)r.top + 0.5f, w - 1.0f, h - 1.0f, 7.0f * k);
+                    Gdiplus::SolidBrush fill(fillCol);
+                    g.FillPath(&fill, &p);
+                    if (hasStroke) {
+                        Gdiplus::Pen border(strokeCol, 1.0f);
+                        g.DrawPath(&border, &p);
+                    }
+                }
+
                 SetBkMode(dis->hDC, TRANSPARENT);
                 SetTextColor(dis->hDC, txtCol);
-                wchar_t txt[64] = {};
-                GetWindowTextW(dis->hwndItem, txt, 63);
-                DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                HFONT f = useBold ? app->settingsBoldFont : app->settingsFont;
+                HGDIOBJ oldF = f ? SelectObject(dis->hDC, f) : nullptr;
+                wchar_t txt[128] = {};
+                GetWindowTextW(dis->hwndItem, txt, 127);
+                DrawTextW(dis->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (oldF) SelectObject(dis->hDC, oldF);
                 return TRUE;
             }
             break;
@@ -2559,6 +2915,9 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (code == BN_CLICKED) {
                 auto isChk = [&](int cid) { return SendMessageW(GetDlgItem(hwnd, cid), BM_GETCHECK, 0, 0) == BST_CHECKED; };
                 switch (id) {
+                    case ID_TAB_0: switchSettingsTab(*app, 0); break;
+                    case ID_TAB_1: switchSettingsTab(*app, 1); break;
+                    case ID_TAB_2: switchSettingsTab(*app, 2); break;
                     case ID_BTN_DRESSING: showDressingRoom(*app); break;
                     case ID_BTN_RENAME_SKIN:
                         if (!app->settings.customSkin.empty()) promptRenameSkin(*app, app->settings.customSkin);
@@ -2705,11 +3064,15 @@ LRESULT CALLBACK settingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->settingsWnd == hwnd) {
                 app->settingsWnd = nullptr;
+                for (int t = 0; t < 3; ++t) app->settingsTabCtrls[t].clear();
                 if (app->settingsFont) { DeleteObject(app->settingsFont); app->settingsFont = nullptr; }
                 if (app->settingsBoldFont) { DeleteObject(app->settingsBoldFont); app->settingsBoldFont = nullptr; }
+                if (app->settingsTitleFont) { DeleteObject(app->settingsTitleFont); app->settingsTitleFont = nullptr; }
+                if (app->settingsSubFont) { DeleteObject(app->settingsSubFont); app->settingsSubFont = nullptr; }
                 if (app->settingsBgBrush) { DeleteObject(app->settingsBgBrush); app->settingsBgBrush = nullptr; }
             }
             return 0;
@@ -2741,24 +3104,29 @@ void showSettingsWindow(AppState& app) {
     float dpiScale = GetDeviceCaps(screen, LOGPIXELSY) / 96.0f;
     ReleaseDC(nullptr, screen);
 
-    const int W = 540, H = 740;
+    const int W = 520, H = 548;
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     RECT frameRc = { 0, 0, 0, 0 };
     AdjustWindowRectEx(&frameRc, style, FALSE, 0);
     int frameW = frameRc.right - frameRc.left, frameH = frameRc.bottom - frameRc.top;
     RECT work = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    int maxClientW = std::max(320, (int)(work.right - work.left) - frameW - 24);
-    int maxClientH = std::max(360, (int)(work.bottom - work.top) - frameH - 24);
+    int maxClientW = std::max(360, (int)(work.right - work.left) - frameW - 24);
+    int maxClientH = std::max(380, (int)(work.bottom - work.top) - frameH - 24);
     float k = std::min({ dpiScale, (float)maxClientW / (float)W, (float)maxClientH / (float)H });
     if (k < 0.65f) k = 0.65f;
+    app.settingsScale = k;
     auto px = [&](int v) { return (int)std::lround(v * k); };
 
     app.settingsDark = settings_ui::isWindowsDarkMode();
-    app.settingsBgBrush = CreateSolidBrush(app.settingsDark ? RGB(32, 32, 36) : RGB(246, 246, 248));
+    app.settingsBgBrush = CreateSolidBrush(app.settingsDark ? RGB(24, 24, 26) : RGB(255, 255, 255));
     app.settingsFont = CreateFontW(-px(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     app.settingsBoldFont = CreateFontW(-px(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.settingsTitleFont = CreateFontW(-px(17), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    app.settingsSubFont = CreateFontW(-px(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
     auto tr = [&](const wchar_t* zh, const wchar_t* eng, const wchar_t* pt) -> const wchar_t* { return app.settings.tr(zh, eng, pt); };
@@ -2774,107 +3142,161 @@ void showSettingsWindow(AppState& app) {
         winW, winH, nullptr, nullptr, inst, nullptr);
     if (!win) return;
     app.settingsWnd = win;
+    for (int t = 0; t < 3; ++t) app.settingsTabCtrls[t].clear();
     settings_ui::applyDwmDarkTitleBar(win, app.settingsDark);
 
-    auto addCtrl = [&](const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, bool bold = false) -> HWND {
+    auto addCtrl = [&](const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, HFONT font = nullptr) -> HWND {
         HWND c = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | st,
             px(x), px(y), px(w), px(h), win, (HMENU)(INT_PTR)id, inst, nullptr);
-        if (c) SendMessageW(c, WM_SETFONT, (WPARAM)(bold ? app.settingsBoldFont : app.settingsFont), TRUE);
+        if (c) SendMessageW(c, WM_SETFONT, (WPARAM)(font ? font : app.settingsFont), TRUE);
+        return c;
+    };
+    auto addTabCtrl = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, HFONT font = nullptr) -> HWND {
+        HWND c = addCtrl(cls, txt, st, x, y, w, h, id, font);
+        if (c && tab >= 0 && tab < 3) app.settingsTabCtrls[tab].push_back(c);
         return c;
     };
 
     using namespace settings_ui;
-    // Section 1: Appearance & Orientation
-    addCtrl(L"BUTTON", tr(L"\u5916\u89C2\u4E0E\u65B9\u5411", L"Appearance & Orientation", L"Aparência e orientação"), BS_GROUPBOX, 14, 10, 512, 264, 0, true);
+    // Minimal Typographic Header (no logo, no bulky banner)
+    addCtrl(L"STATIC", tr(L"KuroCat \u8BBE\u7F6E", L"KuroCat Settings", L"Configurações do KuroCat"), SS_LEFT, 20, 12, 260, 22, 0, app.settingsTitleFont);
+    addCtrl(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, 20, 36, 410, 16, ID_HEADER_SUB, app.settingsSubFont);
 
-    addCtrl(L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin", L"Skin do gato"), SS_LEFT, 28, 38, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 34, 148, 220, ID_COAT_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6362\u88C5\u95F4", L"Wardrobe", L"Provador"), BS_PUSHBUTTON | WS_TABSTOP, 262, 34, 60, 24, ID_BTN_DRESSING);
-    addCtrl(L"BUTTON", tr(L"\u6539\u540D", L"Name", L"Nome"), BS_PUSHBUTTON | WS_TABSTOP, 326, 34, 48, 24, ID_BTN_RENAME_SKIN);
-    addCtrl(L"BUTTON", tr(L"\U0001F5D1\u5220", L"Del", L"\U0001F5D1"), BS_OWNERDRAW | WS_TABSTOP, 378, 34, 52, 24, ID_BTN_DEL_SKIN, true);
-    addCtrl(L"BUTTON", tr(L"\u6279\u91CF\u5220\u9664\u2026", L"Batch Del...", L"Várias…"), BS_PUSHBUTTON | WS_TABSTOP, 434, 34, 78, 24, ID_BTN_BATCH_DEL_SKIN);
+    // 3-Tab Minimal Segmented Bar (no emoji)
+    addCtrl(L"BUTTON", tr(L"\u5916\u89C2", L"Appearance", L"Aparência"), BS_OWNERDRAW | WS_TABSTOP, 23, 65, 158, 26, ID_TAB_0);
+    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8", L"Interaction", L"Interação"), BS_OWNERDRAW | WS_TABSTOP, 181, 65, 158, 26, ID_TAB_1);
+    addCtrl(L"BUTTON", tr(L"\u7CFB\u7EDF", L"System", L"Sistema"), BS_OWNERDRAW | WS_TABSTOP, 339, 65, 158, 26, ID_TAB_2);
 
-    addCtrl(L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta"), SS_LEFT, 28, 70, 76, 20, 0);
-    addCtrl(L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, 110, 70, 178, 20, ID_SKINS_DIR_PATH);
-    addCtrl(L"BUTTON", tr(L"\u9009\u62E9\u6587\u4EF6\u5939\u2026", L"Choose...", L"Escolher…"), BS_PUSHBUTTON | WS_TABSTOP, 292, 66, 100, 24, ID_BTN_CHOOSE_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u6253\u5F00", L"Open", L"Abrir"), BS_PUSHBUTTON | WS_TABSTOP, 396, 66, 50, 24, ID_BTN_OPEN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset", L"Padrão"), BS_PUSHBUTTON | WS_TABSTOP, 450, 66, 62, 24, ID_BTN_RESET_SKINS_DIR);
+    // --- Tab 0: Appearance ---
+    {
+        const int xL = 36, xC = 120;
+        int y = 122;
+        const int dy = 42;
 
-    addCtrl(L"STATIC", tr(L"\u77B3\u8272\u5207\u6362", L"Eye Color", L"Olhos"), SS_LEFT, 28, 102, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 98, 290, 220, ID_EYE_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box", L"Redimensionar"), BS_PUSHBUTTON | WS_TABSTOP, 410, 98, 102, 24, ID_BTN_EDIT_MODE);
+        addTabCtrl(0, L"STATIC", tr(L"\u732B\u54AA\u76AE\u80A4", L"Cat Skin", L"Skin do gato"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 246, 220, ID_COAT_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6539\u540D", L"Rename", L"Nome"), BS_OWNERDRAW | WS_TABSTOP, 372, y, 52, 24, ID_BTN_RENAME_SKIN);
+        addTabCtrl(0, L"BUTTON", tr(L"\u5220\u9664", L"Delete", L"Excluir"), BS_OWNERDRAW | WS_TABSTOP, 430, y, 54, 24, ID_BTN_DEL_SKIN);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard", L"Teclado"), SS_LEFT, 28, 134, 76, 20, 0);
-    addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 130, 290, 220, ID_KB_COMBO);
-    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u952E\u76D8\u2026", L"Import...", L"Importar…"), BS_PUSHBUTTON | WS_TABSTOP, 410, 130, 102, 24, ID_BTN_IMPORT_KB);
+        addTabCtrl(0, L"STATIC", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS | SS_NOPREFIX, xC, y + 4, 162, 18, ID_SKINS_DIR_PATH, app.settingsSubFont);
+        addTabCtrl(0, L"BUTTON", tr(L"\u66F4\u6539", L"Choose", L"Mudar"), BS_OWNERDRAW | WS_TABSTOP, 288, y, 60, 24, ID_BTN_CHOOSE_SKINS_DIR);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6253\u5F00", L"Open", L"Abrir"), BS_OWNERDRAW | WS_TABSTOP, 354, y, 58, 24, ID_BTN_OPEN_SKINS_DIR);
+        addTabCtrl(0, L"BUTTON", tr(L"\u9ED8\u8BA4", L"Reset", L"Padrão"), BS_OWNERDRAW | WS_TABSTOP, 418, y, 66, 24, ID_BTN_RESET_SKINS_DIR);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u7F29\u653E\u5927\u5C0F", L"Pet Scale", L"Tamanho"), SS_LEFT, 28, 168, 76, 20, 0);
-    HWND scaleSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 168, 290, 18, ID_SCALE_SCROLL);
-    SetScrollRange(scaleSb, SB_CTL, 45, 250, FALSE);
-    addCtrl(L"STATIC", L"100%", SS_RIGHT, 410, 168, 48, 20, ID_SCALE_VAL);
+        addTabCtrl(0, L"STATIC", tr(L"\u952E\u76D8\u914D\u8272", L"Keyboard", L"Teclado"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 280, 220, ID_KB_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u5BFC\u5165\u2026", L"Import...", L"Importar…"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_IMPORT_KB);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u671D\u5411\u89D2\u5EA6", L"Rotation", L"Rotação"), SS_LEFT, 28, 200, 76, 20, 0);
-    HWND rotSb = addCtrl(L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, 110, 200, 290, 18, ID_ROT_SCROLL);
-    SetScrollRange(rotSb, SB_CTL, -180, 180, FALSE);
-    addCtrl(L"STATIC", L"0\u00B0", SS_RIGHT, 408, 200, 42, 20, ID_ROT_VAL);
-    addCtrl(L"BUTTON", tr(L"\u5F52\u96F6", L"0\u00B0", L"0°"), BS_PUSHBUTTON | WS_TABSTOP, 458, 196, 54, 24, ID_BTN_ROT_ZERO);
+        addTabCtrl(0, L"STATIC", tr(L"\u77B3\u8272", L"Eye Color", L"Olhos"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        addTabCtrl(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, xC, y, 280, 220, ID_EYE_COMBO);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6846\u9009\u8C03\u6574", L"Edit Box", L"Ajustar"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_EDIT_MODE);
+        y += dy;
 
-    addCtrl(L"BUTTON", tr(L"\u6C34\u5E73\u7FFB\u8F6C", L"Flip Horizontal", L"Espelhar imagem"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 234, 140, 22, ID_CHK_FLIP);
-    addCtrl(L"BUTTON", tr(L"\u767D\u8272\u8D34\u7EB8\u63CF\u8FB9", L"White Sticker Outline", L"Contorno branco (adesivo)"), BS_AUTOCHECKBOX | WS_TABSTOP, 180, 234, 180, 22, ID_CHK_OUTLINE);
-    addCtrl(L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E\u4E0E\u671D\u5411", L"Reset Pose", L"Redefinir posição"), BS_PUSHBUTTON | WS_TABSTOP, 384, 232, 128, 24, ID_BTN_RESET_POS);
+        addTabCtrl(0, L"BUTTON", tr(L"\u767D\u8272\u5916\u63CF\u8FB9\uFF08\u8D34\u7EB8\u98CE\uFF09", L"White Sticker Outline", L"Contorno branco (adesivo)"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y + 2, 220, 22, ID_CHK_OUTLINE);
+        addTabCtrl(0, L"BUTTON", tr(L"\u6C34\u5E73\u955C\u50CF\u7FFB\u8F6C", L"Flip Horizontal", L"Espelhar imagem"), BS_AUTOCHECKBOX | WS_TABSTOP, 270, y + 2, 210, 22, ID_CHK_FLIP);
+        y += dy;
 
-    // Section 2: Interaction & Effects
-    addCtrl(L"BUTTON", tr(L"\u4E92\u52A8\u4E0E\u7279\u6548", L"Interaction & Effects", L"Interação e efeitos"), BS_GROUPBOX, 14, 284, 512, 208, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation", L"Animação de erguer ao arrastar"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 310, 236, 22, ID_CHK_DRAG_ANIM);
-    addCtrl(L"BUTTON", tr(L"\u9AD8\u901F\u6253\u5B57\u751F\u6C14\u8868\u60C5", L"Angry Expression on Fast Typing", L"Cara brava ao digitar rápido"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 310, 236, 22, ID_CHK_ANGER);
-    addCtrl(L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles", L"Carinho e brilho do ronronar"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 338, 236, 22, ID_CHK_PET);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Keyboard Key Badges", L"Mostrar balões das teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 338, 236, 22, ID_CHK_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB", L"Show Mouse Click Badges", L"Mostrar cliques do mouse"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 366, 236, 22, ID_CHK_MOUSE_BADGES);
-    addCtrl(L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends", L"Mostrar letras nas teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 366, 236, 22, ID_CHK_LEGENDS);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee", L"Luz RGB animada no teclado"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 394, 236, 22, ID_CHK_MARQUEE);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard", L"Teclado nivelado"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 394, 236, 22, ID_CHK_LEVEL_KEYBOARD);
+        addTabCtrl(0, L"STATIC", tr(L"\u65CB\u8F6C\u89D2\u5EA6", L"Rotation", L"Rotação"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        HWND rotSb = addTabCtrl(0, L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, xC, y + 3, 228, 18, ID_ROT_SCROLL);
+        SetScrollRange(rotSb, SB_CTL, -180, 180, FALSE);
+        addTabCtrl(0, L"STATIC", L"0\u00B0", SS_RIGHT, 354, y + 3, 44, 20, ID_ROT_VAL);
+        addTabCtrl(0, L"BUTTON", tr(L"\u56DE\u6B63 0\u00B0", L"Reset 0\u00B0", L"Zerar 0°"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_ROT_ZERO);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u591A\u952E\u6253\u5B57", L"Multi-Key", L"Várias teclas"), SS_LEFT, 28, 426, 90, 20, 0);
-    HWND limbCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 422, 388, 140, ID_TYPING_LIMB_COMBO);
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)", L"Pata traseira + cauda (3 / 4 teclas)"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u7B2C\u4E09\u53EA\u811A\u6253\u5B57\uFF08\u4EC5\u540E\u811A\uFF09", L"3rd Hind Foot Only", L"Só a pata traseira"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u7528\u5C3E\u5DF4\u6253\u5B57\uFF08\u4EC5\u5C3E\u5DF4\uFF09", L"Tail Typing Only", L"Só a cauda"));
-    SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u53EA\u7528\u4E24\u53EA\u722A\u722A\u6253\u5B57", L"Two Front Paws Only", L"Só as duas patas da frente"));
+        addTabCtrl(0, L"STATIC", tr(L"\u684C\u5BA0\u5927\u5C0F", L"Scale", L"Tamanho"), SS_LEFT, xL, y + 3, 80, 20, 0);
+        HWND scaleSb = addTabCtrl(0, L"SCROLLBAR", L"", SBS_HORZ | WS_TABSTOP, xC, y + 3, 228, 18, ID_SCALE_SCROLL);
+        SetScrollRange(scaleSb, SB_CTL, 45, 250, FALSE);
+        addTabCtrl(0, L"STATIC", L"100%", SS_RIGHT, 354, y + 3, 44, 20, ID_SCALE_VAL);
+        addTabCtrl(0, L"BUTTON", tr(L"\u91CD\u7F6E\u4F4D\u7F6E", L"Reset", L"Recentrar"), BS_OWNERDRAW | WS_TABSTOP, 406, y, 78, 24, ID_BTN_RESET_POS);
+    }
 
-    addCtrl(L"STATIC", tr(L"\u6570\u4F4D\u677F\u6A21\u5F0F", L"Tablet Mode", L"Mesa e caneta"), SS_LEFT, 28, 458, 90, 20, 0);
-    HWND tabCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 124, 454, 388, 120, ID_TABLET_COMBO);
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B\uFF08\u8FDE\u63A5\u6570\u4F4D\u677F\u65F6\u81EA\u52A8\u5207\u6362\uFF09", L"Auto-Detect (Switch When Connected)", L"Detectar automaticamente (ao conectar a mesa)"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Always Show Tablet & Stylus", L"Sempre mostrar mesa e caneta"));
-    SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse", L"Sempre mostrar mouse"));
+    // --- Tab 1: Interaction ---
+    {
+        const int xL = 36, xR = 268;
+        int y = 124;
+        const int dy = 38;
 
-    // Section 3: Window & System
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u4E0E\u7CFB\u7EDF", L"Window & System", L"Janela e sistema"), BS_GROUPBOX, 14, 502, 512, 224, 0, true);
-    addCtrl(L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top", L"Sempre no topo"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 528, 236, 22, ID_CHK_TOPMOST);
-    addCtrl(L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen", L"Ocultar em apps de tela cheia"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 528, 236, 22, ID_CHK_AUTOHIDE_FS);
-    addCtrl(L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u4E34\u65F6\u89E3\u9501)", L"Full Click-Through (Hold Alt)", L"Ignorar cliques (segure Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 556, 236, 22, ID_CHK_CLICKTHROUGH);
-    addCtrl(L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup", L"Abrir ao iniciar o Windows"), BS_AUTOCHECKBOX | WS_TABSTOP, 276, 556, 236, 22, ID_CHK_AUTOSTART);
-    addCtrl(L"BUTTON", tr(L"\u59CB\u7EC8\u4EE5\u7BA1\u7406\u5458\u8EAB\u4EFD\u8FD0\u884C", L"Always Run as Administrator", L"Sempre executar como admin"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 584, 236, 22, ID_CHK_RUN_ADMIN);
-    addCtrl(L"BUTTON", app.isElevated ? tr(L"\u2713 \u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"\u2713 Running as Admin", L"✓ Em modo admin")
-                                      : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin", L"Reiniciar como admin"),
-            BS_PUSHBUTTON | WS_TABSTOP, 276, 582, 148, 24, ID_BTN_RELAUNCH_ADMIN);
-    addCtrl(L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A\uFF08\u97F3\u4E50/\u5A92\u4F53\u64AD\u653E\u5668\uFF09", L"Auto Headphones on Music", L"Fones automáticos ao ouvir música"), BS_AUTOCHECKBOX | WS_TABSTOP, 28, 612, 340, 22, ID_CHK_AUTO_HEADPHONES);
+        addTabCtrl(1, L"BUTTON", tr(L"\u62CE\u8D77\u62D6\u62FD\u52A8\u753B", L"Scruff-Drag Lift Animation", L"Erguer ao arrastar"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_DRAG_ANIM);
+        addTabCtrl(1, L"BUTTON", tr(L"\u6253\u5B57\u8FC7\u5FEB\u751F\u6C14\u8868\u60C5", L"Angry on Fast Typing", L"Cara brava ao digitar rápido"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_ANGER);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"OBS \u76F4\u64AD", L"OBS Capture", L"Captura OBS"), SS_LEFT, 28, 646, 78, 20, 0);
-    HWND obsCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 642, 210, 120, ID_OBS_COMBO);
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)", L"Desligado (normal)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3\uFF08\u9700 WGC \u91C7\u96C6\uFF09", L"OBS Transparent (Needs WGC)", L"OBS transparente (WGC)"));
-    SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55\uFF08\u901A\u7528\u517C\u5BB9\uFF0C\u63A8\u8350\u76F4\u64AD\u59EC\uFF09", L"OBS Green Screen (Universal)", L"OBS tela verde (universal)"));
-    addCtrl(L"BUTTON", tr(L"\u540E\u53F0\u6355\u83B7\uFF08\u9690\u85CF\u684C\u9762\uFF09", L"Hide on Desktop", L"Ocultar na tela"), BS_AUTOCHECKBOX | WS_TABSTOP, 332, 644, 180, 22, ID_CHK_OBS_HIDE);
+        addTabCtrl(1, L"BUTTON", tr(L"\u6478\u732B\u4E92\u52A8\u4E0E\u5495\u565C\u7279\u6548", L"Petting & Purr Sparkles", L"Carinho e brilho do ronronar"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_PET);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u6309\u952E\u6C14\u6CE1", L"Show Key Badges", L"Balões das teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_BADGES);
+        y += dy;
 
-    addCtrl(L"STATIC", tr(L"\u754C\u9762\u8BED\u8A00", L"Language", L"Idioma"), SS_LEFT, 28, 680, 78, 20, 0);
-    HWND langCb = addCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 676, 150, 110, ID_LANG_COMBO);
-    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
-    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
-    SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"Português");
-    addCtrl(L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta de skins"), BS_PUSHBUTTON | WS_TABSTOP, 270, 676, 116, 24, ID_BTN_SKINS_DIR);
-    addCtrl(L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards Dir", L"Pasta de teclados"), BS_PUSHBUTTON | WS_TABSTOP, 392, 676, 120, 24, ID_BTN_KB_DIR);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u9F20\u6807\u70B9\u51FB\u63D0\u793A", L"Show Mouse Badges", L"Cliques do mouse"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_MOUSE_BADGES);
+        addTabCtrl(1, L"BUTTON", tr(L"\u663E\u793A\u952E\u76D8\u5B57\u7B26", L"Show Keycap Legends", L"Letras nas teclas"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_LEGENDS);
+        y += dy;
+
+        addTabCtrl(1, L"BUTTON", tr(L"\u952E\u76D8\u8DD1\u9A6C\u706F\u6D41\u5149", L"Keyboard RGB Marquee", L"Luz RGB no teclado"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_MARQUEE);
+        addTabCtrl(1, L"BUTTON", tr(L"\u952E\u76D8\u6C34\u5E73\u6446\u653E", L"Level Keyboard", L"Teclado nivelado"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_LEVEL_KEYBOARD);
+        y += dy + 8;
+
+        addTabCtrl(1, L"STATIC", tr(L"\u591A\u952E\u6253\u5B57\u65B9\u5F0F", L"Multi-Key", L"Várias teclas"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND limbCb = addTabCtrl(1, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 344, 140, ID_TYPING_LIMB_COMBO);
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u540E\u811A + \u5C3E\u5DF4\uFF083\u952E\u540E\u811A / 4\u952E\u5C3E\u5DF4\uFF09", L"Hind Foot + Tail (3-Key / 4-Key)", L"Pata traseira + cauda (3 / 4 teclas)"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u540E\u811A\u6253\u5B57", L"3rd Hind Foot Only", L"Só a pata traseira"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u5C3E\u5DF4\u6253\u5B57", L"Tail Typing Only", L"Só a cauda"));
+        SendMessageW(limbCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u4EC5\u4E24\u53EA\u524D\u722A\u6253\u5B57", L"Two Front Paws Only", L"Só as duas patas da frente"));
+        y += dy + 6;
+
+        addTabCtrl(1, L"STATIC", tr(L"\u6570\u4F4D\u677F\u4E0E\u89E6\u63A7\u7B14", L"Tablet & Stylus", L"Mesa e caneta"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND tabCb = addTabCtrl(1, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 344, 120, ID_TABLET_COMBO);
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u81EA\u52A8\u68C0\u6D4B", L"Auto-Detect", L"Detectar automaticamente"));
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u6570\u4F4D\u677F", L"Always Show Tablet", L"Sempre mostrar a mesa"));
+        SendMessageW(tabCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u59CB\u7EC8\u663E\u793A\u9F20\u6807", L"Always Show Mouse", L"Sempre mostrar o mouse"));
+    }
+
+    // --- Tab 2: System ---
+    {
+        const int xL = 36, xR = 268;
+        int y = 124;
+        const int dy = 38;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u7A97\u53E3\u7F6E\u9876\u663E\u793A", L"Always On Top", L"Sempre no topo"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_TOPMOST);
+        addTabCtrl(2, L"BUTTON", tr(L"\u5168\u5C4F\u5E94\u7528\u65F6\u81EA\u52A8\u9690\u85CF", L"Auto-Hide in Fullscreen", L"Ocultar em tela cheia"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_AUTOHIDE_FS);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u5B8C\u5168\u9F20\u6807\u7A7F\u900F (Alt \u62D6\u52A8)", L"Full Click-Through (Alt)", L"Ignorar cliques (Alt)"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_CLICKTHROUGH);
+        addTabCtrl(2, L"BUTTON", tr(L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8", L"Launch at Startup", L"Abrir ao iniciar o Windows"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_AUTOSTART);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", tr(L"\u542C\u6B4C\u81EA\u52A8\u6234\u8033\u673A", L"Auto Headphones on Music", L"Fones ao ouvir música"), BS_AUTOCHECKBOX | WS_TABSTOP, xL, y, 220, 22, ID_CHK_AUTO_HEADPHONES);
+        addTabCtrl(2, L"BUTTON", tr(L"\u59CB\u7EC8\u7BA1\u7406\u5458\u8FD0\u884C", L"Always Run as Admin", L"Sempre como admin"), BS_AUTOCHECKBOX | WS_TABSTOP, xR, y, 216, 22, ID_CHK_RUN_ADMIN);
+        y += dy;
+
+        addTabCtrl(2, L"BUTTON", app.isElevated ? tr(L"\u5DF2\u7BA1\u7406\u5458\u8FD0\u884C", L"Running as Admin", L"Em modo admin")
+                                                : tr(L"\u7BA1\u7406\u5458\u8EAB\u4EFD\u91CD\u542F", L"Restart as Admin", L"Reiniciar como admin"),
+                   BS_OWNERDRAW | WS_TABSTOP, xL, y, 150, 24, ID_BTN_RELAUNCH_ADMIN);
+        addTabCtrl(2, L"BUTTON", tr(L"\u76AE\u80A4\u76EE\u5F55", L"Skins Dir", L"Pasta"), BS_OWNERDRAW | WS_TABSTOP, 312, y, 82, 24, ID_BTN_SKINS_DIR);
+        addTabCtrl(2, L"BUTTON", tr(L"\u952E\u76D8\u76EE\u5F55", L"Keyboards", L"Teclados"), BS_OWNERDRAW | WS_TABSTOP, 402, y, 82, 24, ID_BTN_KB_DIR);
+        y += dy + 8;
+
+        addTabCtrl(2, L"STATIC", tr(L"OBS \u76F4\u64AD\u6355\u83B7", L"OBS Capture", L"Captura OBS"), SS_LEFT, xL, y + 3, 96, 20, 0);
+        HWND obsCb = addTabCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 140, y, 200, 120, ID_OBS_COMBO);
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"\u5173\u95ED\uFF08\u6B63\u5E38\u60AC\u6D6E\uFF09", L"Off (Normal Overlay)", L"Desligado (normal)"));
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u900F\u660E\u7A97\u53E3", L"OBS Transparent", L"OBS transparente"));
+        SendMessageW(obsCb, CB_ADDSTRING, 0, (LPARAM)tr(L"OBS \u7EFF\u5E55 (#00FF00)", L"OBS Green Screen", L"OBS tela verde"));
+        addTabCtrl(2, L"BUTTON", tr(L"\u540E\u53F0\u9690\u85CF\u684C\u9762", L"Hide Desktop", L"Ocultar na tela"), BS_AUTOCHECKBOX | WS_TABSTOP, 350, y + 1, 134, 22, ID_CHK_OBS_HIDE);
+        y += dy + 6;
+
+        addTabCtrl(2, L"STATIC", tr(L"\u8BED\u8A00 / Language", L"Language", L"Idioma"), SS_LEFT, xL, y + 3, 110, 20, 0);
+        HWND langCb = addTabCtrl(2, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 154, y, 160, 90, ID_LANG_COMBO);
+        SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"\u7B80\u4F53\u4E2D\u6587");
+        SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"English");
+        SendMessageW(langCb, CB_ADDSTRING, 0, (LPARAM)L"Português");
+    }
+
+    // Bottom Clean Action Bar (no emoji)
+    addCtrl(L"BUTTON", tr(L"\u6279\u91CF\u5220\u9664\u76AE\u80A4", L"Batch Delete", L"Excluir várias"), BS_OWNERDRAW | WS_TABSTOP, 20, H - 40, 148, 28, ID_BTN_BATCH_DEL_SKIN);
+    addCtrl(L"BUTTON", tr(L"\u5BFC\u5165\u76AE\u80A4\u2026", L"Import Skin...", L"Importar skin…"), BS_OWNERDRAW | WS_TABSTOP, W - 20 - 128, H - 40, 128, 28, ID_BTN_DRESSING);
 
     settings_ui::rebuildCombosAndSync(app);
+    switchSettingsTab(app, app.settingsTab);
     ShowWindow(win, SW_SHOWNORMAL);
     SetForegroundWindow(win);
 }
@@ -3026,6 +3448,7 @@ LRESULT CALLBACK updateWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
+
         case WM_DESTROY:
             if (app && app->updateWnd == hwnd) {
                 app->updateWnd = nullptr;
@@ -3271,7 +3694,7 @@ void handleUpdateDownloadResult(AppState& app, const UpdateDownloadResult& res) 
         launched = launchProcessArgs(res.newExePath, args);
     }
     if (launched) {
-        PostQuitMessage(0);
+        quitApp(app);
         return;
     }
     const int lang = app.settings.language;
@@ -3323,7 +3746,12 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // Essential quick actions
-    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE, app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet", L"Ocultar gatinho") : tr(L"\u663E\u793A\u684C\u5BA0", L"Show Pet", L"Mostrar gatinho"));
+    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_VISIBLE,
+        app.isVisible ? tr(L"\u9690\u85CF\u684C\u5BA0", L"Hide Pet", L"Ocultar gatinho")
+                      : tr(L"\U0001F431 \u663E\u793A\u684C\u5BA0", L"\U0001F431 Show Pet", L"\U0001F431 Mostrar gatinho"));
+    if (!app.isVisible) {
+        SetMenuDefaultItem(menu, CMD_TOGGLE_VISIBLE, FALSE);
+    }
 
     // Quick Cat Skin switcher
     HMENU coatMenu = CreatePopupMenu();
@@ -3422,9 +3850,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
 
     switch (cmd) {
         case CMD_TOGGLE_VISIBLE:
-            app.isVisible = !app.isVisible;
-            app.hiddenByFullscreen = false;
-            ShowWindow(app.hwnd, app.isVisible ? SW_SHOWNOACTIVATE : SW_HIDE);
+            setPetVisible(app, !app.isVisible, true);
             break;
         case CMD_TOGGLE_CLICKTHROUGH:
             app.settings.fullClickThrough = !app.settings.fullClickThrough;
@@ -3763,6 +4189,18 @@ void tickAndRender(AppState& app) {
     }
 
     // Smart Click-Through + Petting Detection
+    if (app.isDragging) {
+        POINT cur = {};
+        GetCursorPos(&cur);
+        float t = std::clamp(app.physics.scruffDrag.value, 0.0f, 1.0f);
+        float ease = t * t * (3.0f - 2.0f * t);
+        int nx = app.dragStartWinOrigin.x + (cur.x - app.dragStartCursor.x) + (int)std::lround(app.dragScruffDeltaX * ease);
+        int ny = app.dragStartWinOrigin.y + (cur.y - app.dragStartCursor.y) + (int)std::lround(app.dragScruffDeltaY * ease);
+        if (nx != wr.left || ny != wr.top) {
+            SetWindowPos(app.hwnd, nullptr, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            GetWindowRect(app.hwnd, &wr);
+        }
+    }
     if (!app.isDragging && app.activeResizeCorner < 0 && !app.isRotating) {
         POINT cur = {};
         GetCursorPos(&cur);
@@ -3786,11 +4224,7 @@ void tickAndRender(AppState& app) {
                             app.physics.registerPetStroke(cp, d, true, app.settings);
                             if (app.physics.totalPetSessions != app.lastSavedPetSessions) {
                                 app.lastSavedPetSessions = app.physics.totalPetSessions;
-                                app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+                                CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
                             }
                         }
                     }
@@ -3862,9 +4296,11 @@ void tickAndRender(AppState& app) {
     curPose.activeKeyHash = kh;
     curPose.totalKeystrokesToday = app.input.totalKeystrokesToday;
     curPose.totalPetSessions = app.physics.totalPetSessions;
-    curPose.headY10 = (int)std::lround(app.physics.headOffsetY.value * 10.0f);
+    curPose.headX10 = (int)std::lround(app.physics.bodyShiftX.value * 10.0f + app.physics.headYaw.value * 20.0f);
+    curPose.headY10 = (int)std::lround(app.physics.headOffsetY.value * 10.0f + app.physics.headPitch.value * 20.0f);
     curPose.leftPawY10 = (int)std::lround(app.physics.leftPaw.y.value * 10.0f);
     curPose.rightPawY10 = (int)std::lround(app.physics.rightPaw.y.value * 10.0f);
+    curPose.thirdPawY10 = (int)std::lround(app.physics.hindFoot.y.value * 10.0f);
     curPose.breath100 = (int)std::lround(app.physics.breathingOffset() * 100.0f);
     curPose.blink100 = (int)std::lround(app.physics.blinkProgress() * 100.0f);
     curPose.sleep100 = (int)std::lround(app.physics.sleepiness * 100.0f);
@@ -3872,6 +4308,9 @@ void tickAndRender(AppState& app) {
     curPose.purr100 = (int)std::lround(app.physics.petHeadIntensity * 100.0f);
     curPose.happy100 = (int)std::lround(app.physics.petBodyIntensity * 100.0f);
     curPose.sparkleCount = (int)app.physics.sparkles.size();
+    curPose.music100 = (int)std::lround(app.physics.musicIntensity * 100.0f);
+    curPose.musicPhase20 = (app.physics.musicIntensity > 0.01f) ? (int)std::lround(app.physics.musicPhase * 20.0f) : 0;
+    curPose.marquee20 = app.settings.keyboardMarquee ? (int)std::lround(app.physics.marqueePhase * 20.0f) : 0;
 
     if (!app.forceRedraw && curPose == app.lastRenderedPose) {
         return;
@@ -3932,6 +4371,7 @@ double desiredFrameInterval(const AppState& app, double now) {
                   app.physics.petHeadIntensity > 0.05f ||
                   app.physics.petBodyIntensity > 0.05f;
     if (active) return FRAME_INTERVAL; // 60 Hz when active
+    if (app.physics.musicIntensity > 0.01f || app.physics.isMusicPlaying) return 0.05; // 20 Hz for smooth headphones & rhythm
     if (app.physics.sleepiness > 0.5f) return 0.10; // 10 Hz when sleeping
     return 0.05; // 20 Hz when idle awake
 }
@@ -4102,8 +4542,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
                 app->isDragging = true;
+                app->dragMouseButton = 1;
                 app->dragStartCursor = cur;
+                app->lastDragCursor = cur;
                 app->dragStartWinOrigin = { wr.left, wr.top };
+                if (app->settings.enableDragAnimation) {
+                    Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
+                    float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
+                    app->dragScruffDeltaX = (float)cur.x - pinch.x * sc - (float)wr.left;
+                    app->dragScruffDeltaY = (float)cur.y - pinch.y * sc - (float)wr.top;
+                } else {
+                    app->dragScruffDeltaX = 0.0f;
+                    app->dragScruffDeltaY = 0.0f;
+                }
                 app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
                 SetCapture(hwnd);
             }
@@ -4154,15 +4605,64 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetWindowPos(hwnd, nullptr, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
                 return 0;
             }
-            if (app && app->isDragging) {
+            // When Windows mouse buttons are swapped (SM_SWAPBUTTON), also allow dragging via the
+            // secondary button (physical left) once moved past the drag threshold, while preserving
+            // normal click-to-open-menu when released without dragging.
+            if (app && hwnd == app->hwnd && app->rButtonDown && !app->isDragging && GetSystemMetrics(SM_SWAPBUTTON) != 0) {
                 POINT cur = {};
                 GetCursorPos(&cur);
-                RECT wr = {};
-                GetWindowRect(hwnd, &wr);
-                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x);
-                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y);
-                float stepDx = (float)(nx - wr.left);
-                float stepDy = (float)(ny - wr.top);
+                int threshX = std::max(5, GetSystemMetrics(SM_CXDRAG));
+                int threshY = std::max(5, GetSystemMetrics(SM_CYDRAG));
+                if (std::abs(cur.x - app->rButtonDownCursor.x) >= threshX ||
+                    std::abs(cur.y - app->rButtonDownCursor.y) >= threshY) {
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->rButtonDown = false;
+                    app->isDragging = true;
+                    app->dragMouseButton = 2;
+                    app->dragStartCursor = app->rButtonDownCursor;
+                    app->lastDragCursor = cur;
+                    app->dragStartWinOrigin = { wr.left, wr.top };
+                    if (app->settings.enableDragAnimation) {
+                        Pt pinch = CatRenderer::scruffPinchCanvasPoint(activeSkin(*app), app->settings.flipHorizontal, app->settings.rotationDeg);
+                        float sc = (float)std::max(1L, wr.right - wr.left) / CatPhysics::CanvasWidth;
+                        app->dragScruffDeltaX = (float)app->rButtonDownCursor.x - pinch.x * sc - (float)wr.left;
+                        app->dragScruffDeltaY = (float)app->rButtonDownCursor.y - pinch.y * sc - (float)wr.top;
+                    } else {
+                        app->dragScruffDeltaX = 0.0f;
+                        app->dragScruffDeltaY = 0.0f;
+                    }
+                    app->physics.setDragging(app->settings.enableDragAnimation, 0.0f);
+                }
+            }
+            if (app && app->isDragging) {
+                bool activeBtnDown = (app->dragMouseButton == 2)
+                    ? ((wParam & MK_RBUTTON) != 0)
+                    : ((wParam & MK_LBUTTON) != 0);
+                if (!activeBtnDown) {
+                    app->isDragging = false;
+                    app->dragMouseButton = 0;
+                    app->dragScruffDeltaX = 0.0f;
+                    app->dragScruffDeltaY = 0.0f;
+                    app->physics.setDragging(false);
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->settings.posX = wr.left;
+                    app->settings.posY = wr.top;
+                    app->settings.saveToRegistry();
+                    refreshSettingsWindow(*app);
+                    return 0;
+                }
+                POINT cur = {};
+                GetCursorPos(&cur);
+                float t = std::clamp(app->physics.scruffDrag.value, 0.0f, 1.0f);
+                float ease = t * t * (3.0f - 2.0f * t);
+                int nx = app->dragStartWinOrigin.x + (cur.x - app->dragStartCursor.x) + (int)std::lround(app->dragScruffDeltaX * ease);
+                int ny = app->dragStartWinOrigin.y + (cur.y - app->dragStartCursor.y) + (int)std::lround(app->dragScruffDeltaY * ease);
+                float stepDx = (float)(cur.x - app->lastDragCursor.x);
+                float stepDy = (float)(cur.y - app->lastDragCursor.y);
+                app->lastDragCursor = cur;
                 float rad = -app->settings.rotationDeg * (3.14159265f / 180.0f);
                 float c = std::cos(rad), s = std::sin(rad);
                 float localDx = stepDx * c - stepDy * s;
@@ -4194,10 +4694,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 refreshSettingsWindow(*app);
                 return 0;
             }
-            if (app && app->isDragging) {
+            if (app && app->isDragging && app->dragMouseButton != 2) {
                 app->isDragging = false;
+                app->dragMouseButton = 0;
                 app->physics.setDragging(false);
-                ReleaseCapture();
+                if (GetCapture() == hwnd) ReleaseCapture();
                 RECT wr = {};
                 GetWindowRect(hwnd, &wr);
                 app->settings.posX = wr.left;
@@ -4230,25 +4731,41 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 bool altHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
                 if (!app->settings.fullClickThrough || altHeld) {
                     app->rButtonDown = true;
+                    GetCursorPos(&app->rButtonDownCursor);
                     SetCapture(hwnd);
                 }
             }
             return 0;
 
         case WM_RBUTTONUP:
-            if (app && hwnd == app->hwnd && app->rButtonDown) {
-                app->rButtonDown = false;
-                if (GetCapture() == hwnd) ReleaseCapture();
-                POINT pt = {};
-                GetCursorPos(&pt);
-                if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) {
-                    // Defer opening the popup menu until shortly after Alt is released so Windows'
-                    // WM_SYSKEYUP/SC_KEYMENU finishes cleanly before TrackPopupMenu enters its modal loop.
-                    app->pendingMenuAfterAlt = true;
-                    app->pendingMenuAltUpTime = 0.0;
-                    app->pendingMenuPt = pt;
-                } else {
-                    showContextMenu(*app, pt);
+            if (app && hwnd == app->hwnd) {
+                if (app->isDragging && app->dragMouseButton == 2) {
+                    app->isDragging = false;
+                    app->dragMouseButton = 0;
+                    app->physics.setDragging(false);
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    RECT wr = {};
+                    GetWindowRect(hwnd, &wr);
+                    app->settings.posX = wr.left;
+                    app->settings.posY = wr.top;
+                    app->settings.saveToRegistry();
+                    refreshSettingsWindow(*app);
+                    return 0;
+                }
+                if (app->rButtonDown) {
+                    app->rButtonDown = false;
+                    if (GetCapture() == hwnd) ReleaseCapture();
+                    POINT pt = {};
+                    GetCursorPos(&pt);
+                    if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) {
+                        // Defer opening the popup menu until shortly after Alt is released so Windows'
+                        // WM_SYSKEYUP/SC_KEYMENU finishes cleanly before TrackPopupMenu enters its modal loop.
+                        app->pendingMenuAfterAlt = true;
+                        app->pendingMenuAltUpTime = 0.0;
+                        app->pendingMenuPt = pt;
+                    } else {
+                        showContextMenu(*app, pt);
+                    }
                 }
             }
             return 0;
@@ -4261,6 +4778,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CAPTURECHANGED:
             if (app && hwnd == app->hwnd) {
                 app->rButtonDown = false;
+                app->dragMouseButton = 0;
                 if (app->isDragging) {
                     app->isDragging = false;
                     app->physics.setDragging(false);
@@ -4269,7 +4787,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_TRAYICON:
-            if (app && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP || lParam == WM_CONTEXTMENU)) {
+            if (app && lParam == WM_LBUTTONDBLCLK) {
+                if (!app->isVisible || app->hiddenByFullscreen) {
+                    setPetVisible(*app, true);
+                }
+            } else if (app && (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP || lParam == WM_CONTEXTMENU)) {
                 POINT pt = {};
                 GetCursorPos(&pt);
                 showContextMenu(*app, pt);
@@ -4307,9 +4829,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     app->settings.fullClickThrough = false;
                     app->settings.saveToRegistry();
                 }
-                if (!app->isVisible) {
-                    app->isVisible = true;
-                    ShowWindow(app->hwnd, SW_SHOWNOACTIVATE);
+                if (!app->isVisible || app->hiddenByFullscreen) {
+                    setPetVisible(*app, true);
                 }
                 POINT pt = {};
                 GetCursorPos(&pt);
@@ -4388,6 +4909,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else DragFinish((HDROP)wParam);
             return 0;
 
+        case WM_CLOSE:
+            if (app && hwnd == app->menuOwnerHwnd) return 0;
+            break;
+
         case WM_DESTROY:
             if (hwnd == (app ? app->hwnd : nullptr)) {
                 KillTimer(hwnd, TIMER_RENDER);
@@ -4400,14 +4925,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         UnhookWinEvent(app->foregroundHook);
                         app->foregroundHook = nullptr;
                     }
+                    // Delete tray icon while menuOwnerHwnd (nid.hWnd) is still a valid window!
+                    Shell_NotifyIconW(NIM_DELETE, &app->nid);
+                    app->nid.hWnd = nullptr;
+                    if (app->trayIcon) { DestroyIcon(app->trayIcon); app->trayIcon = nullptr; }
                     if (app->menuOwnerHwnd) {
                         UnregisterHotKey(app->menuOwnerHwnd, HOTKEY_CLICKTHROUGH_ID);
                         RemovePropW(app->menuOwnerHwnd, VERSION_PROP);
                         DestroyWindow(app->menuOwnerHwnd);
                         app->menuOwnerHwnd = nullptr;
                     }
-                    Shell_NotifyIconW(NIM_DELETE, &app->nid);
-                    if (app->trayIcon) DestroyIcon(app->trayIcon);
                     if (app->dressingRoom) DestroyWindow(app->dressingRoom);
                     if (app->updateWnd && IsWindow(app->updateWnd)) {
                         app->replacingUpdateWnd = true;
@@ -4539,6 +5066,10 @@ bool handleNativeSelfUpdateIfRequested() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    { // skins carrying a newer minAppVersion are refused with an upgrade hint
+        std::wstring v = APP_VERSION;
+        SkinSpec::appVersion.assign(v.begin(), v.end());
+    }
     // Enable best available DPI awareness (Per-Monitor V2 on Win10/11, Per-Monitor on Win8.1, System DPI on Win7)
     enableBestDpiAwareness();
 
@@ -4597,12 +5128,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (app.settings.runAsAdmin && !app.isElevated && !noElevate) {
         if (hMutex) { CloseHandle(hMutex); hMutex = nullptr; }
         if (relaunchSelfElevated(L"--takeover --no-elevate")) {
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
-    g_app = nullptr;
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            g_app = nullptr;
             return 0;
         }
         hMutex = CreateMutexW(nullptr, FALSE, kMutexName);
@@ -4626,17 +5153,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (today != app.statsDay) {
             app.statsDay = today;
             app.input.totalKeystrokesToday = 1;
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         } else if (app.input.totalKeystrokesToday % 10 == 0) {
-            app.audioThreadStop.store(true, std::memory_order_relaxed);
-    app.audioThreadCv.notify_all();
-    if (app.audioThread.joinable()) app.audioThread.join();
-
-    CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
+            CatSettings::saveStatsToRegistry(app.statsDay, app.input.totalKeystrokesToday, app.physics.totalPetSessions);
         }
         app.physics.triggerKeyDown(k, app.settings, activeSkin(app).typingStyle == SkinTypingStyle::Douni, &app.input.activeKeys);
     };
@@ -4742,18 +5261,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     app.audioThread = std::thread([&app]() {
         HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         double sustainedSince = 0.0;
+        double lastPlayingSeen = 0.0;
         while (!app.audioThreadStop.load(std::memory_order_relaxed)) {
             if (app.audioPollingEnabled.load(std::memory_order_relaxed)) {
                 double t = nowSeconds();
                 if (isSystemAudioPlaying()) {
                     if (sustainedSince == 0.0) sustainedSince = t;
-                    app.audioSustainedPlaying.store((t - sustainedSince) >= 1.2, std::memory_order_relaxed);
+                    lastPlayingSeen = t;
+                    if ((t - sustainedSince) >= 1.2) {
+                        app.audioSustainedPlaying.store(true, std::memory_order_relaxed);
+                    }
                 } else {
-                    sustainedSince = 0.0;
-                    app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+                    bool wasPlaying = app.audioSustainedPlaying.load(std::memory_order_relaxed);
+                    if (wasPlaying && (t - lastPlayingSeen) < 1.8) {
+                        // Brief pause/silence tolerance (< 1.8s) so headphones don't flicker between tracks or speech pauses.
+                    } else {
+                        sustainedSince = 0.0;
+                        app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
+                    }
                 }
             } else {
                 sustainedSince = 0.0;
+                lastPlayingSeen = 0.0;
                 app.audioSustainedPlaying.store(false, std::memory_order_relaxed);
             }
             std::unique_lock<std::mutex> lk(app.audioThreadMu);

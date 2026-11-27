@@ -1,0 +1,25 @@
+{
+  "_doc": "Single source of truth for how skin part spaces map onto the 360x320 canvas. Edit here, then run `python3 scripts/gen-rig.py` (rewrites the generated blocks in every port) and `python3 tests/rig/reference.py --write` (refreshes the golden values). `bash scripts/check-rig.sh` verifies that every port still matches.",
+  "canvas": { "width": 360, "height": 320 },
+  "seatAnchor": { "x": 184, "y": 226 },
+  "headTurn": {
+    "_doc": "yawRad = headYaw * yawPerUnit, pitchRad = headPitch * pitchPerUnit (headYaw/headPitch are the physics springs, in [-1, 1]). The head centre also slides sideways by headYaw * headShiftPerYaw.",
+    "yawPerUnit": 0.5,
+    "pitchPerUnit": 0.36,
+    "maxHeadYaw": 1.0,
+    "headShiftPerYaw": 7.5
+  },
+  "headSurface": {
+    "_doc": "dome: z = domeDepth * sqrt(1 - x^2/domeRadiusX^2 - y^2/domeRadiusY^2) (0 outside the ellipse); plane: z = planeDepth.",
+    "domeRadiusX": 46,
+    "domeRadiusY": 40,
+    "domeDepth": 29.6,
+    "planeDepth": 27.5
+  },
+  "bodyDeform": {
+    "_doc": "lieS = smoothstep(lieIntensity); sy = bodySquash * (1 - lieS * lieSquash); sx = (1 + (1 - bodySquash) * squashWiden) * (1 + lieS * lieWiden).",
+    "lieSquash": 0.42,
+    "squashWiden": 0.55,
+    "lieWiden": 0.03
+  }
+}
